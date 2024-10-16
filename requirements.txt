@@ -1,0 +1,6 @@
+torch
+dgl
+wigners
+sphecerix
+biotite
+sphericart[torch]
