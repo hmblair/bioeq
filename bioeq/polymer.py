@@ -315,6 +315,7 @@ class GeometricPolymer:
     num_atoms:        {self.num_atoms}
     num_edges:        {self.num_edges}
     node_feature dim: {self.node_features.size(1)}
+    node_feature repr dim: {self.node_features.size(2)}
     edge_feature dim: {self.edge_features.size(1)}"""
 
 
@@ -379,6 +380,7 @@ class PolymerDistance(nn.Module):
         weight: torch.Tensor | None = None,
     ) -> None:
 
+        super().__init__()
         self.weight = weight
 
     def forward(
