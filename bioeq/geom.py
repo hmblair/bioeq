@@ -138,10 +138,10 @@ def tm_score(
     be tensors of shape (..., N, 3). The result is a tensor of shape (...,).
     """
 
-    # Compute the pairwise distances between the points in the point clouds
-    d = torch.cdist(x, y)
+    # Compute the squared distances between the points in the point clouds
+    d = ((x - y) ** 2).sum(-1)
     # Compute the TM-score
-    return (1 / (1 + (d / d0) ** 2)).mean(-1)
+    return (1 / (1 + d / (d0 ** 2))).mean(-1)
 
 
 class TMScore(nn.Module):
