@@ -10,14 +10,74 @@ pip install .
 ```
 
 # Usage
-The `GeometricPolymer` class is exposed in the `bioeq.polymer` module. Its three main attributes are its `.node_features`, `.edge_features`, and `.graph`. The method `.from_pdb` loads the coordinates and elements from a PDB file and creates a `GeometricPolymer` with the element indices as node featuers and relative positions as edge features. Alternatively, the `PolymerDataset` will lazily load from a folder of PDB files.
+Import the `GeometricPolymer` class, and load the example PDB with a nearest-neighbour edge degree of 16.
+```
+from bioeq.polymer import GeometricPolymer
 
-The `bioeq.modules` module contains the `EquivariantTransformer` class. This has a `.polymer` method which takes as input a `GeometricPolymer` and updates its ndoe features using the transformer layers. Each layer, and hence the entire module, is equivariant to rotations.
+file = 'examples/6xrz.pdb'
+edge_degree = 16
+polymer = GeometricPolymer.from_pdb(file, edge_degree)
+```
 
-To specify an input, you should use a `Repr` object from `bioeq.geom`. This represents a representation of SO(3), and thus takes as input a set of degrees. Recall that
- - degree-0 features are the 1D invariant features, and
- - degree-1 features are the 3D equivariant features.
+Print the polymer;
+```
+GeometricPolymer:
+    num_molecules:    1
+    num_chains:       1
+    num_residues:     88
+    num_atoms:        2808
+    num_edges:        44928
+    node_features:
+        repr dim:     1
+        multiplicity: 1
+    edge_feature dim: 1
+```
+By default, the node features are initialised to a single degree-0 feature, which is the element type. Likewise, the edge features are initialised using the pairwise distances.
 
-The `Repr` class also takes in a multiplicity, which specifies the number of copies of each degree. The same goes for the output and hidden layers, each of which have their own associated representation.
+Create a single degree-0 representation for our input features, and a degree-1 representation with multiplicity 4 as an example output. Also, create a hidden representation with degrees 0 and 1, and multiplicity 16.
+```
+from bioeq.geom import Repr
 
-When passing the tensors to the models, it is always expected that they are of shape `(..., n, d)`, where `n` is the multiplicity of the representation and `d` is the dimension. For example, `Repr([1], 32)` creates 32 degree-1 representations, which corresponds to an input/output tensor of shape `(..., 32, 3)`.
+in_repr = Repr([0], 1)
+out_repr = Repr([1], 4)
+hidden_repr = Repr([0, 1], 16)
+```
+
+Instantiaze an equivariant transformer with the single default edge feature as input, and a hidden size in the radial weight computation of 16. Set the hidden layers to 2.
+```
+from bioeq.modules import EquivariantTransformer
+
+edge_dim = 1
+edge_hidden_dim = 16
+nlayers = 2
+
+transformer = EquivariantTransformer(
+   in_repr,
+   out_repr,
+   hidden_repr,
+   nlayers,
+   edge_dim,
+   edge_hidden_dim,
+)
+```
+
+Pass the polymer to the equivariant transformer to get a new set of node features.
+```
+out_polymer = transformer.polymer(polymer)
+```
+
+Print the output polymer;
+```
+GeometricPolymer:
+    num_molecules:    1
+    num_chains:       1
+    num_residues:     88
+    num_atoms:        2808
+    num_edges:        44928
+    node_features:
+        repr dim:     3
+        multiplicity: 4
+    edge_feature dim: 1
+```
+
+Note how the node features have changed in degree and multiplicity, but the structure of the molecule has remained teh same, as have the edge features.
