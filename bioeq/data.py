@@ -1,6 +1,7 @@
 from __future__ import annotations
 import torch
 from biotite.structure.io import load_structure
+from biotite.structure import connect_via_residue_names
 import numpy as np
 
 ELEMENT_IX = {
@@ -16,7 +17,7 @@ PDB_SUFFIX = '.pdb'
 
 
 def read_pdb(file: str) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
     """
     Read information from a PDB file.
@@ -28,6 +29,19 @@ def read_pdb(file: str) -> tuple[
     coordinates = torch.from_numpy(
         struct.coord,
     ).to(torch.float32)
+    # Get the bonds and their types
+    bonds = connect_via_residue_names(
+        struct
+    ).as_array()
+    bond_src = torch.from_numpy(
+        bonds[:, 0]
+    ).long()
+    bond_dst = torch.from_numpy(
+        bonds[:, 1]
+    ).long()
+    bond_type = torch.from_numpy(
+        bonds[:, 2]
+    ).long()
     # Get the elements as integers
     elements = torch.tensor([
         ELEMENT_IX[element]
@@ -49,9 +63,12 @@ def read_pdb(file: str) -> tuple[
         struct.chain_id,
         return_inverse=True,
     )
-    chain_ix = torch.from_numpy(chain_ix)
+    chain_ix = torch.from_numpy(chain_ix).long()
     return (
         coordinates,
+        bond_src,
+        bond_dst,
+        bond_type,
         elements,
         residue_ix,
         chain_ix,
