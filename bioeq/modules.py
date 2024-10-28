@@ -9,9 +9,9 @@ from .geom import (
     EquivariantBases,
 )
 from .polymer import GeometricPolymer
-from kernel import CUDA_AVAILABLE
+from .kernel import CUDA_AVAILABLE
 if CUDA_AVAILABLE:
-    from kernel._mm import EquivariantMatmulKernel
+    from .kernel._mm import EquivariantMatmulKernel
 import torch
 import torch.nn as nn
 import dgl
