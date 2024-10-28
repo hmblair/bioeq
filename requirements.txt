@@ -5,3 +5,4 @@ sphecerix
 biotite
 torch_scatter
 sphericart[torch]
+xarray
