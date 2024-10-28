@@ -94,7 +94,7 @@ def read_pdb(file: str) -> tuple[
             struct.chain_id,
             return_inverse=True,
         )
-    chain_ix = torch.from_numpy(chain_ix).long()
+        chain_ix = torch.from_numpy(chain_ix).long()
     return (
         coordinates,
         bond_src,

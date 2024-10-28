@@ -98,16 +98,18 @@ class GeometricPolymer:
         self: GeometricPolymer,
         coordinates: torch.Tensor,
         graph: dgl.DGLGraph,
-        node_features: torch.Tensor,
-        edge_features: torch.Tensor,
+        elements: torch.Tensor,
+        residues: torch.Tensor,
         residue_ix: torch.Tensor,
         chain_ix: torch.Tensor,
+        edge_features: torch.Tensor,
     ) -> None:
 
         # Ensure that all node sizes match
         if not allequal(
             coordinates.size(0),
-            node_features.size(0),
+            elements.size(0),
+            residues.size(0),
             residue_ix.size(0),
             chain_ix.size(0),
         ):
@@ -129,7 +131,9 @@ class GeometricPolymer:
         # Store all attributes
         self.coordinates = coordinates
         self.graph = graph
-        self.node_features = node_features
+        self.node_features = None
+        self.elements = elements
+        self.residues = residues
         self.edge_features = edge_features
         self.residue_ix = residue_ix
         self.chain_ix = chain_ix
@@ -183,14 +187,11 @@ class GeometricPolymer:
         edge_features = torch.norm(
             coordinates[U] - coordinates[V], dim=1
         )[:, None]
-        # Get the node features
-        node_features = torch.cat(
-            [elements, residues], dim=1
-        )
         return cls(
             coordinates,
             graph,
-            node_features,
+            elements,
+            residues,
             edge_features,
             residue_ix,
             chain_ix,
