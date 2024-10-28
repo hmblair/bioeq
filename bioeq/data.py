@@ -14,6 +14,7 @@ ELEMENT_IX = {
 }
 NUM_ELEMENTS = len(ELEMENT_IX)
 RES_IX = {
+    "": -1,
     "A": 0,
     "C": 1,
     "G": 2,
