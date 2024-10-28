@@ -13,7 +13,9 @@ from torch_scatter import (
 from data import read_pdb, PDB_SUFFIX
 import os
 from copy import copy
-from random import shuffle
+import numpy as np
+import xarray as xr
+from pathlib import Path
 
 NODE_DIM = 0
 UV_DIM = 1
@@ -451,14 +453,16 @@ class PolymerDataset(tdata.Dataset):
     def __init__(
         self: PolymerDataset,
         directory: str,
+        energy_file: str,
         edge_degree: int,
+        suffix: str = '.pdb',
     ) -> None:
 
         # Get the names of all the PDB files
         self.files = [
             directory + '/' + file
             for file in os.listdir(directory)
-            if file.endswith(PDB_SUFFIX)
+            if file.endswith(suffix)
         ]
         if not self.files:
             raise RuntimeError(
@@ -467,6 +471,8 @@ class PolymerDataset(tdata.Dataset):
             )
         # Store the edge degree
         self.degree = edge_degree
+        # Get the additional features
+        self.ds = xr.load_dataset(energy_file)
 
     def shuffle(
         self: PolymerDataset,
@@ -475,7 +481,9 @@ class PolymerDataset(tdata.Dataset):
         Shuffle the files in the dataset.
         """
 
-        shuffle(self.files)
+        ix = np.random.permutation(len(self))
+        self.files = [self.files[i] for i in ix]
+        self.ds = self.ds.isel(ix)
 
     def __len__(
         self: PolymerDataset,
@@ -489,13 +497,22 @@ class PolymerDataset(tdata.Dataset):
     def __getitem__(
         self: PolymerDataset,
         ix: int,
-    ) -> GeometricPolymer:
+    ) -> tuple[GeometricPolymer, torch.Tensor]:
         """
         Get the PDB file at index ix and create a GeometricPolyemr
         from it.
         """
 
-        return GeometricPolymer.from_pdb(
+        polymer = GeometricPolymer.from_pdb(
             self.files[ix],
             self.degree,
         )
+
+        file_number = int(Path(
+            self.files[ix]
+        ).stem)
+        energy = torch.tensor(
+            self.ds['energy'].values[file_number]
+        )
+
+        return polymer, energy
