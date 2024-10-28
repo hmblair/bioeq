@@ -68,21 +68,31 @@ def read_pdb(file: str) -> tuple[
         for res in struct.res_name
     ]).long()[:, None, None]
     # Get which residue each atom belongs to
-    residue_ix = torch.from_numpy(
-        struct.res_id,
-    ).long()
-    residue_ix = residue_ix - residue_ix[0]
-    # The residue indices are often screwed up in the PDB file. We
-    # re-index them here.
-    diffs = torch.cat(
-        (torch.tensor([0]), residue_ix[1:] != residue_ix[:-1])
-    )
-    residue_ix = torch.cumsum(diffs, dim=0)
+    if all(not res for res in struct.res_id):
+        residue_ix = torch.zeros(
+            len(struct.res_id),
+        ).long()
+    else:
+        residue_ix = torch.from_numpy(
+            struct.res_id,
+        ).long()
+        residue_ix = residue_ix - residue_ix[0]
+        # The residue indices are often screwed up in the PDB file. We
+        # re-index them here.
+        diffs = torch.cat(
+            (torch.tensor([0]), residue_ix[1:] != residue_ix[:-1])
+        )
+        residue_ix = torch.cumsum(diffs, dim=0)
     # Get which chain each atom belongs to
-    _, chain_ix = np.unique(
-        struct.chain_id,
-        return_inverse=True,
-    )
+    if all(not res for res in struct.chain_id):
+        chain_ix = torch.zeros(
+            len(struct.chain_id),
+        ).long()
+    else:
+        _, chain_ix = np.unique(
+            struct.chain_id,
+            return_inverse=True,
+        )
     chain_ix = torch.from_numpy(chain_ix).long()
     return (
         coordinates,
