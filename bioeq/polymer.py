@@ -192,9 +192,9 @@ class GeometricPolymer:
             graph,
             elements,
             residues,
-            edge_features,
             residue_ix,
             chain_ix,
+            edge_features,
         )
 
     def residue_reduce(
