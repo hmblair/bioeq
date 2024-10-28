@@ -13,11 +13,26 @@ ELEMENT_IX = {
     "D": 0,
 }
 NUM_ELEMENTS = len(ELEMENT_IX)
+RES_IX = {
+    "A": 0,
+    "C": 1,
+    "G": 2,
+    "T": 3,
+    "U": 3,
+}
+NUM_RES = len(RES_IX)
 PDB_SUFFIX = '.pdb'
 
 
 def read_pdb(file: str) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
 ]:
     """
     Read information from a PDB file.
@@ -46,7 +61,12 @@ def read_pdb(file: str) -> tuple[
     elements = torch.tensor([
         ELEMENT_IX[element]
         for element in struct.element
-    ]).long()[:, None]
+    ]).long()[:, None, None]
+    # Get the residues as integers
+    residues = torch.tensor([
+        RES_IX[res]
+        for res in struct.res_name
+    ]).long()[:, None, None]
     # Get which residue each atom belongs to
     residue_ix = torch.from_numpy(
         struct.res_id,
@@ -70,6 +90,7 @@ def read_pdb(file: str) -> tuple[
         bond_dst,
         bond_type,
         elements,
+        residues,
         residue_ix,
         chain_ix,
     )

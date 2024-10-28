@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-from .geom import (
+from geom import (
     Repr,
     ProductRepr,
     RepNorm,
@@ -8,12 +8,21 @@ from .geom import (
     REPR_DIM,
     EquivariantBases,
 )
-from .polymer import GeometricPolymer
+from polymer import GeometricPolymer
+from kernel import CUDA_AVAILABLE
+if CUDA_AVAILABLE:
+    from kernel._mm import EquivariantMatmulKernel
 import torch
 import torch.nn as nn
 import dgl
 from copy import copy, deepcopy
 import itertools
+import os
+
+
+KERNEL = os.environ.get("BIOEQ_KERNEL", "0") == "1"
+if KERNEL and not CUDA_AVAILABLE:
+    raise RuntimeError('The kernel was not compiled.')
 
 
 class EquivariantLinear(nn.Module):
@@ -46,9 +55,10 @@ class EquivariantLinear(nn.Module):
         )
         # Get the indices which will retrieve the correct
         # degrees for the output
-        self.indices = torch.Tensor(
+        indices = torch.Tensor(
             repr.indices(),
         ).long()
+        self.register_buffer('indices', indices)
         # Store the dimensions used in the indexing
         self.expanddims = (
             1,
@@ -163,10 +173,17 @@ class RadialWeight(nn.Module):
         # Store the representation
         self.repr = repr
         # Get the output dimension shape
-        self.outdims = (
-            repr.rep2.mult,
-            repr.rep1.mult * repr.nreps(),
-        )
+        if KERNEL:
+            self.outdims = (
+                repr.nreps(),
+                repr.rep1.mult,
+                repr.rep2.mult,
+            )
+        else:
+            self.outdims = (
+                repr.rep2.mult,
+                repr.rep1.mult * repr.nreps(),
+            )
         # Create the layers
         tmp_out_dim = repr.nreps() * repr.rep1.mult * repr.rep2.mult
         self.layer1 = nn.Linear(
@@ -215,8 +232,8 @@ class EquivariantConvolution(nn.Module):
         hidden_dim: int,
         dropout: float = 0.0,
     ) -> None:
-        super().__init__()
 
+        super().__init__()
         self.rwlin = RadialWeight(
             repr,
             edge_dim,
@@ -224,6 +241,10 @@ class EquivariantConvolution(nn.Module):
             dropout
         )
         self.outdim = repr.rep2.dim()
+        if KERNEL:
+            self._kernel_mm = EquivariantMatmulKernel(repr)
+        else:
+            self._kernel_mm = None
 
     def _mm(
         self: EquivariantConvolution,
@@ -262,7 +283,10 @@ class EquivariantConvolution(nn.Module):
         # Compute the radial weights from the edge features
         rw = self.rwlin(edge_feats)
         # Pass the parameters to the matrix multiplication kernel
-        return self._mm(g, basis, rw, f)
+        if KERNEL:
+            return self._kernel_mm(g, basis, rw, f)
+        else:
+            return self._mm(g, basis, rw, f)
 
 
 class GraphAttention(nn.Module):

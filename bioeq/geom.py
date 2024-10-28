@@ -314,6 +314,8 @@ class Irrep:
             q[self.l + m, self.l + abs(m)] = (-1)**m * SQRT2
             q[self.l + m, self.l - abs(m)] = 1j * (-1)**m * SQRT2
         # Fill in the zero degree
+        q[self.l, self.l] = 1
+        # Scale by the correct complex factor
         q = (-1j)**self.l * q
         return q
 
@@ -430,13 +432,10 @@ class ProductIrrep:
                     self.rep2.l,
                 )
             ).to(torch.complex128)
-
-            # renormalize the coefficient
+            # Renormalize the coefficient
             c_coeff /= rep.dim()
-
             # Get the third conversion matrix
             Q = rep.toreal()
-
             # Convert to the real coefficient
             coeff[cdim:cdim+rep.dim(), :, repnum, :] = torch.einsum(
                 'ij,kl,mn,ikm->jln',
@@ -747,6 +746,50 @@ class ProductRepr:
             self.maxdim(), -1
         ).contiguous()
 
+    def low_rank_coupling(
+        self: ProductRepr,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Return the two low-rank coupling coefficients for the real
+        irreducible decomposition of this tensor product.
+        """
+
+        # TODO: this does not currently work.
+
+        coeff_1 = torch.zeros(
+            self.maxdim(),
+            self.rep1.dim(),
+            self.rep2.nreps(),
+        )
+
+        for repnum, (rep, o, o2) in enumerate(zip(self.rep1.irreps, self.rep1.cumdims(), self.rep1.offsets())):
+            l_lower = o
+            l_upper = o + rep.dim()
+            for j in range(l_lower, l_upper):
+                coeff_1[o2 + j, j, repnum] = 1
+
+        coeff_1 = coeff_1.view(
+            self.maxdim(), -1
+        )
+
+        coeff_2 = torch.zeros(
+            self.maxdim(),
+            self.rep2.dim(),
+            self.rep2.nreps(),
+        )
+
+        for repnum, (rep, o, o2) in enumerate(zip(self.rep2.irreps, self.rep2.cumdims(), self.rep2.offsets())):
+            l_lower = o
+            l_upper = o + rep.dim()
+            for j in range(l_lower, l_upper):
+                coeff_2[o2 + j, j, repnum] = 1
+
+        coeff_2 = coeff_2.view(
+            self.maxdim(), -1
+        )
+
+        return coeff_1, coeff_2
+
 
 #
 # Equivariant maps and helper functions
@@ -781,6 +824,7 @@ class RepNorm(nn.Module):
         norms = torch.zeros(
             st.shape[:-1] + (self.nreps,),
             device=st.device,
+            dtype=st.dtype,
         )
         # Compute the norm of the representation of each degree
         for i in range(self.nreps):
@@ -883,8 +927,9 @@ class EquivariantBasis(nn.Module):
         self.register_buffer('coupling', coupling)
         if KERNEL:
             self.outdims = (
+                repr.lmax() + 1,
                 repr.rep1.dim(),
-                repr.rep2.dim() * (repr.lmax() + 1),
+                repr.rep2.dim(),
             )
         else:
             self.outdims = (
@@ -934,19 +979,9 @@ class EquivariantBasis(nn.Module):
 
 
 class EquivariantBases(nn.Module):
-    """
-    A variant of EquivariantBasis which uses the same spherical harmonic
-    features to compute multiple equivariant maps for multiple ProductReps.
-    Even if a long list of ProductReps is passed, this function only computes
-    each unique matrix once.
-    """
-
-    def __init__(
-        self: EquivariantBases,
-        *reprs: ProductRepr,
-    ) -> None:
-
+    def __init__(self: EquivariantBases, *reprs: ProductRepr) -> None:
         super().__init__()
+
         # To avoid redundant operations, we only keep the unique ProductReps
         # and keep track of the indices of each one
         self.unique_reprs = []
@@ -961,24 +996,51 @@ class EquivariantBases(nn.Module):
         # Get the maximum maxdim and lmax
         maxdim = max(repr.maxdim() for repr in self.unique_reprs)
         lmax = max(repr.lmax() for repr in self.unique_reprs)
+
         # Create matrices to store the expanded coupling coefficients
-        self.couplings = [
-            torch.zeros(
-                maxdim,
-                repr.rep1.dim(),
-                repr.nreps(),
-                repr.rep2.dim(),
-            ).view(maxdim, -1)
-            for repr in self.unique_reprs
-        ]
+        couplings = []
+        if KERNEL:
+            couplings = [
+                torch.zeros(
+                    maxdim,
+                    repr.rep1.dim(),
+                    repr.lmax() + 1,
+                    repr.rep2.dim(),
+                ).view(maxdim, -1)
+                for repr in self.unique_reprs
+            ]
+        else:
+            couplings = [
+                torch.zeros(
+                    maxdim,
+                    repr.rep1.dim(),
+                    repr.nreps(),
+                    repr.rep2.dim(),
+                ).view(maxdim, -1)
+                for repr in self.unique_reprs
+            ]
+
+        # Register each coupling as a buffer
+        for i, coupling in enumerate(couplings):
+            self.register_buffer(f"coupling_{i}", coupling)
+
         # Fill in the matrices
-        for repr, coupling in zip(self.unique_reprs, self.couplings):
+        for repr, coupling in zip(self.unique_reprs, couplings):
             coupling[:repr.maxdim()] = repr.coupling()
+
         # Store the output dimensions
-        self.outdims = [(
-            repr.rep1.dim(),
-            repr.rep2.dim() * repr.nreps(),
-        ) for repr in self.unique_reprs]
+        if KERNEL:
+            self.outdims = [(
+                repr.rep1.dim(),
+                repr.lmax() + 1,
+                repr.rep2.dim(),
+            ) for repr in self.unique_reprs]
+        else:
+            self.outdims = [(
+                repr.rep1.dim(),
+                repr.rep2.dim() * repr.nreps(),
+            ) for repr in self.unique_reprs]
+
         # Initialise the spherical harmonic calculator
         self.sh = SphericalHarmonic(lmax)
 
@@ -999,21 +1061,13 @@ class EquivariantBases(nn.Module):
         # input features in the convolution step
         return (sh_r @ coupling).view(*b, *outdims)
 
-    def forward(
-        self: EquivariantBases,
-        x: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
-        """
-        Take a set of equivariant edge features of shape (..., n, 3) and return
-        the equivariant weight matrix W of shape (..., n, d_in, d_out, lmax).
-        """
-
+    def forward(self: EquivariantBases, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # Get the spherical harmonic features
         sh = self.sh(x)
         # Matrix multiplication
         ms = [
-            self._mm(sh, coupling, outdims)
-            for coupling, outdims in zip(self.couplings, self.outdims)
+            self._mm(sh, getattr(self, f"coupling_{i}"), outdims)
+            for i, outdims in enumerate(self.outdims)
         ]
         # Expand to the required number of outputs without a new calculation
         return tuple(ms[ix] for ix in self.repr_ix)
@@ -1032,8 +1086,9 @@ class EquivariantBases(nn.Module):
         sh = self.sh.edgewise(x, graph)
         # Matrix multiplication
         ms = [
-            self._mm(sh, coupling, outdims)
-            for coupling, outdims in zip(self.couplings, self.outdims)
+            self._mm(sh, getattr(
+                self, f"coupling_{i}"), outdims)
+            for i, outdims in enumerate(self.outdims)
         ]
         # Expand to the required number of outputs without a new calculation
         return tuple(ms[ix] for ix in self.repr_ix)

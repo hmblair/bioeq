@@ -10,8 +10,10 @@ from torch_scatter import (
     scatter_max as t_scatter_max,
     scatter_min as t_scatter_min,
 )
-from .data import read_pdb, PDB_SUFFIX
+from data import read_pdb, PDB_SUFFIX
 import os
+from copy import copy
+from random import shuffle
 
 NODE_DIM = 0
 UV_DIM = 1
@@ -143,7 +145,10 @@ class GeometricPolymer:
         self.molecule_sizes = graph.batch_num_nodes()
         # Compute which molecule each node belongs to
         self.molecule_ix = torch.repeat_interleave(
-            torch.arange(self.num_molecules),
+            torch.arange(
+                self.num_molecules,
+                device=graph.device,
+            ),
             self.molecule_sizes,
         )
 
@@ -158,7 +163,14 @@ class GeometricPolymer:
         """
 
         # Read the PDB file
-        coordinates, elements, residue_ix, chain_ix = read_pdb(filename)
+        (coordinates,
+         bond_src,
+         bond_dst,
+         bond_type,
+         elements,
+         residues,
+         residue_ix,
+         chain_ix) = read_pdb(filename)
         # Construct a knn graph from the coordinates
         graph = dgl.knn_graph(
             coordinates,
@@ -169,10 +181,14 @@ class GeometricPolymer:
         edge_features = torch.norm(
             coordinates[U] - coordinates[V], dim=1
         )[:, None]
+        # Get the node features
+        node_features = torch.cat(
+            [elements, residues], dim=1
+        )
         return cls(
             coordinates,
             graph,
-            elements,
+            node_features,
             edge_features,
             residue_ix,
             chain_ix,
@@ -259,8 +275,9 @@ class GeometricPolymer:
         # Return true if any edge connects a masked pair of residues
         return (src_mask & dst_mask).any(UV_DIM)
 
-    def reldist(
+    def relpos(
         self: GeometricPolymer,
+        max: int | None = None,
     ) -> torch.Tensor:
         """
         Return a 1D tensor of length self.num_edges containing the
@@ -271,7 +288,13 @@ class GeometricPolymer:
         # Get the source and destination nodes of each edge
         U, V = self.graph.edges()
         # Compute the distance in the sequence
-        return self.residue_ix[V] - self.residue_ix[U]
+        relpos = self.residue_ix[V] - self.residue_ix[U]
+        # Clamp if a maximum distance is given
+        if max is not None:
+            relpos = torch.clamp(
+                relpos, -max, max
+            )
+        return relpos
 
     def center(
         self: GeometricPolymer,
@@ -302,6 +325,23 @@ class GeometricPolymer:
             self.molecule_sizes.tolist(),
         )
 
+    def to(
+        self: GeometricPolymer,
+        device: str | torch.device,
+    ) -> GeometricPolymer:
+        """
+        Move all tensors to the given device.
+        """
+
+        # Copy so as not to overwrite
+        new = copy(self)
+        # Move all relevant tensors to the device
+        new.coordinates = self.coordinates.to(device)
+        new.node_features = self.node_features.to(device)
+        new.edge_features = self.edge_features.to(device)
+        new.graph = self.graph.to(device)
+        return new
+
     def __repr__(
         self: GeometricPolymer,
     ) -> str:
@@ -314,8 +354,9 @@ class GeometricPolymer:
     num_residues:     {self.num_residues}
     num_atoms:        {self.num_atoms}
     num_edges:        {self.num_edges}
-    node_feature dim: {self.node_features.size(1)}
-    node_feature repr dim: {self.node_features.size(2)}
+    node_features:
+        repr dim:     {self.node_features.size(2)}
+        multiplicity: {self.node_features.size(1)}
     edge_feature dim: {self.edge_features.size(1)}"""
 
 
@@ -356,6 +397,8 @@ def polymer_kabsch_distance(
     # the sign of the final one if necessary
     sigma = torch.linalg.svdvals(cov)
     det = torch.linalg.det(cov)
+    # Clone to preserve gradients
+    sigma = sigma.clone()
     sigma[det < 0, -1] = - sigma[det < 0, -1]
     sigma = sigma.mean(-1)
     # Get the variances of the point clouds
@@ -424,6 +467,15 @@ class PolymerDataset(tdata.Dataset):
             )
         # Store the edge degree
         self.degree = edge_degree
+
+    def shuffle(
+        self: PolymerDataset,
+    ) -> None:
+        """
+        Shuffle the files in the dataset.
+        """
+
+        shuffle(self.files)
 
     def __len__(
         self: PolymerDataset,
