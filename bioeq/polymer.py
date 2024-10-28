@@ -10,7 +10,7 @@ from torch_scatter import (
     scatter_max as t_scatter_max,
     scatter_min as t_scatter_min,
 )
-from data import read_pdb, PDB_SUFFIX
+from .data import read_pdb, PDB_SUFFIX
 import os
 from copy import copy
 import numpy as np

@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-from geom import (
+from .geom import (
     Repr,
     ProductRepr,
     RepNorm,
@@ -8,7 +8,7 @@ from geom import (
     REPR_DIM,
     EquivariantBases,
 )
-from polymer import GeometricPolymer
+from .polymer import GeometricPolymer
 from kernel import CUDA_AVAILABLE
 if CUDA_AVAILABLE:
     from kernel._mm import EquivariantMatmulKernel
