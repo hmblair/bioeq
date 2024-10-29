@@ -583,6 +583,18 @@ class Repr:
             for _ in range(irrep.dim())
         ]
 
+    def verify(
+        self: Repr,
+        st: torch.Tensor,
+    ) -> bool:
+        """
+        Check if the given spherical tensor has dimensions matchinig this
+        representation.
+        """
+        if st.size(-2) != self.mult or st.size(-1) != self.dim():
+            return False
+        return True
+
     def rot(
         self: Repr,
         axis: torch.Tensor,
