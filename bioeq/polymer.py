@@ -10,12 +10,8 @@ from torch_scatter import (
     scatter_max as t_scatter_max,
     scatter_min as t_scatter_min,
 )
-from .data import read_pdb, PDB_SUFFIX
-import os
+from data import StructureDataset
 from copy import copy
-import numpy as np
-import xarray as xr
-from pathlib import Path
 
 NODE_DIM = 0
 UV_DIM = 1
@@ -34,176 +30,45 @@ def allequal(*x: Any) -> bool:
     return len(set(x)) <= 1
 
 
-def batch(
-    items: list[GeometricPolymer],
-) -> GeometricPolymer:
+class Polymer:
     """
-    Stack multiple geometric polymers into a single unit.
-    """
-
-    if not items:
-        raise ValueError('At least one GeometricPolymer must be provided.')
-
-    # Get the new coordinates, node and edge features
-    coordinates = torch.cat(
-        [poly.coordinates for poly in items]
-    )
-    node_features = torch.cat(
-        [poly.node_features for poly in items]
-    )
-    edge_features = torch.cat(
-        [poly.edge_features for poly in items]
-    )
-    # Get the new graph
-    graph = dgl.batch(
-        [poly.graph for poly in items]
-    )
-    # Get updated residue indices. To do so, we must offset the indices of
-    # each item by the cumulative number of residues in the previous molecule.
-    num_residues = torch.tensor(
-        [0] + [poly.num_residues for poly in items[:-1]]
-    )
-    cum_residues = torch.cumsum(num_residues, dim=0)
-    residue_ix = torch.cat(
-        [poly.residue_ix + cumres
-         for poly, cumres in zip(items, cum_residues)]
-    )
-    # Do the same for the chains
-    num_chains = torch.tensor(
-        [0] + [poly.num_chains for poly in items[:-1]]
-    )
-    cum_chains = torch.cumsum(num_chains, dim=0)
-    chain_ix = torch.cat(
-        [poly.chain_ix + cumchain
-         for poly, cumchain in zip(items, cum_chains)]
-    )
-    # Create the batched GeometricPolymer
-    return GeometricPolymer(
-        coordinates,
-        graph,
-        node_features,
-        edge_features,
-        residue_ix,
-        chain_ix,
-    )
-
-
-class GeometricPolymer:
-    """
-    A geometric graph which is divided into three levels of coarseness:
-    molecule, residue, and atom.
+    Store all purely spatial information about a polymer.
     """
 
     def __init__(
-        self: GeometricPolymer,
+        self: Polymer,
         coordinates: torch.Tensor,
         graph: dgl.DGLGraph,
-        elements: torch.Tensor,
-        residues: torch.Tensor,
         residue_ix: torch.Tensor,
         chain_ix: torch.Tensor,
-        edge_features: torch.Tensor,
+        molecule_ix: torch.Tensor,
     ) -> None:
-
-        # Ensure that all node sizes match
-        if not allequal(
-            coordinates.size(0),
-            elements.size(0),
-            residues.size(0),
-            residue_ix.size(0),
-            chain_ix.size(0),
-        ):
-            raise ValueError(
-                "The coordinates, node features, chain and residue indices"
-                " must have the same first dimension."
-            )
-
-        # Ensure that all edge sizes match
-        if not allequal(
-            edge_features.size(0),
-            graph.num_edges(),
-        ):
-            raise ValueError(
-                "The edge features must have their first dimension equal to"
-                " the number of nodes."
-            )
 
         # Store all attributes
         self.coordinates = coordinates
         self.graph = graph
-        self.node_features = None
-        self.elements = elements
-        self.residues = residues
-        self.edge_features = edge_features
         self.residue_ix = residue_ix
         self.chain_ix = chain_ix
-        # Store the number of atoms and edges
-        self.num_atoms = coordinates.size(0)
+        self.molecule_ix = molecule_ix
+        # Compute the number of edges, atoms, residues, chains, and
+        # molecules
         self.num_edges = graph.num_edges()
-        # Compute the number of residues and their sizes
+        self.num_atoms = coordinates.size(0)
         self.num_residues = self.residue_ix[-1].item() + 1
-        self.residue_sizes = torch.bincount(self.residue_ix)
-        # Compute the number of chains and their sizes
         self.num_chains = self.chain_ix[-1].item() + 1
-        self.chain_sizes = torch.bincount(self.chain_ix)
-        # Get the number of molecules and their sizes
-        self.num_molecules = graph.batch_size
-        self.molecule_sizes = graph.batch_num_nodes()
-        # Compute which molecule each node belongs to
-        self.molecule_ix = torch.repeat_interleave(
-            torch.arange(
-                self.num_molecules,
-                device=graph.device,
-            ),
-            self.molecule_sizes,
-        )
-
-    @classmethod
-    def from_pdb(
-        cls: type[GeometricPolymer],
-        filename: str,
-        edge_degree: int,
-    ) -> GeometricPolymer:
-        """
-        Create a GeometricPolymer object from a PDB file.
-        """
-
-        # Read the PDB file
-        (coordinates,
-         bond_src,
-         bond_dst,
-         bond_type,
-         elements,
-         residues,
-         residue_ix,
-         chain_ix) = read_pdb(filename)
-        # Construct a knn graph from the coordinates
-        graph = dgl.knn_graph(
-            coordinates,
-            edge_degree,
-        )
-        # Use the pairwise distances as bond features
-        U, V = graph.edges()
-        edge_features = torch.norm(
-            coordinates[U] - coordinates[V], dim=1
-        )[:, None]
-        return cls(
-            coordinates,
-            graph,
-            elements,
-            residues,
-            residue_ix,
-            chain_ix,
-            edge_features,
+        self.num_molecules = self.molecule_ix[-1].item() + 1
+        # Compute the size of each molecule
+        self.molecule_sizes = torch.bincount(
+            self.molecule_ix
         )
 
     def residue_reduce(
-        self: GeometricPolymer,
+        self: Polymer,
         features: torch.Tensor,
         rtype: str = 'mean',
     ) -> torch.Tensor | tuple[torch.Tensor, torch.LongTensor]:
         """
-        Reduce the input features within each residue. Min and max reductions
+        Reduce the input values within each residue. Min and max reductions
         return the indices too.
         """
 
@@ -214,12 +79,12 @@ class GeometricPolymer:
         )
 
     def chain_reduce(
-        self: GeometricPolymer,
+        self: Polymer,
         features: torch.Tensor,
         rtype: str = 'mean',
     ) -> torch.Tensor | tuple[torch.Tensor, torch.LongTensor]:
         """
-        Reduce the input features within each chain. Min and max reductions
+        Reduce the input values within each chain. Min and max reductions
         return the indices too.
         """
 
@@ -230,12 +95,12 @@ class GeometricPolymer:
         )
 
     def molecule_reduce(
-        self: GeometricPolymer,
+        self: Polymer,
         features: torch.Tensor,
         rtype: str = 'mean',
     ) -> torch.Tensor | tuple[torch.Tensor, torch.LongTensor]:
         """
-        Reduce the input features within each molecule. Min and max reductions
+        Reduce the input values within each molecule. Min and max reductions
         return the indices too.
         """
 
@@ -246,7 +111,7 @@ class GeometricPolymer:
         )
 
     def bond_mask(
-        self: GeometricPolymer,
+        self: Polymer,
         mask: torch.Tensor | None = None,
         reverse: bool = False,
     ) -> torch.Tensor:
@@ -279,7 +144,7 @@ class GeometricPolymer:
         return (src_mask & dst_mask).any(UV_DIM)
 
     def relpos(
-        self: GeometricPolymer,
+        self: Polymer,
         max: int | None = None,
     ) -> torch.Tensor:
         """
@@ -300,7 +165,7 @@ class GeometricPolymer:
         return relpos
 
     def center(
-        self: GeometricPolymer,
+        self: Polymer,
     ) -> None:
         """
         Center the coordinates of each molecule in the polymer.
@@ -312,13 +177,12 @@ class GeometricPolymer:
         self.coordinates = self.coordinates - coord_means[self.molecule_ix]
 
     def connect(
-        self: GeometricPolymer,
+        self: Polymer,
         num_neighbours: int,
     ) -> None:
         """
         Replace the existing graph with a knn graph based on the current
-        coordinates. WARNING: if this changes the number of edges in the
-        graph, then the class instance will become unusable.
+        coordinates.
         """
 
         # Call into the dgl engine
@@ -327,6 +191,79 @@ class GeometricPolymer:
             num_neighbours,
             self.molecule_sizes.tolist(),
         )
+        # Update the number of edges
+        self.num_edges = self.graph.num_edges()
+
+    def to(
+        self: Polymer,
+        device: str | torch.device,
+    ) -> Polymer:
+        """
+        Move all tensors to the given device.
+        """
+
+        # Copy so as not to overwrite
+        new = copy(self)
+        # Move all relevant tensors to the device
+        new.coordinates = self.coordinates.to(device)
+        new.graph = self.graph.to(device)
+        return new
+
+    def __repr__(
+        self: Polymer,
+    ) -> str:
+        """
+        Return a little information.
+        """
+        return f"""Polymer:
+    num_molecules:    {self.num_molecules}
+    num_chains:       {self.num_chains}
+    num_residues:     {self.num_residues}
+    num_atoms:        {self.num_atoms}
+    num_edges:        {self.num_edges}"""
+
+
+class GeometricPolymer(Polymer):
+    """
+    A geometric graph which is divided into four levels of coarseness:
+    molecule, chain, residue, and atom.
+    """
+
+    def __init__(
+        self: GeometricPolymer,
+        polymer: Polymer,
+        node_features: torch.Tensor,
+        edge_features: torch.Tensor,
+    ) -> None:
+
+        super().__init__(
+            polymer.coordinates,
+            polymer.graph,
+            polymer.residue_ix,
+            polymer.chain_ix,
+            polymer.molecule_ix,
+        )
+        # Ensure that all node sizes match
+        if not allequal(
+            polymer.num_atoms,
+            node_features.size(0),
+        ):
+            raise ValueError(
+                "The node features must have the same first"
+                " dimension as the number of atoms."
+            )
+        # Ensure that all edge sizes match
+        if not allequal(
+            polymer.graph.num_edges(),
+            edge_features.size(0),
+        ):
+            raise ValueError(
+                "The edge features must have their first dimension equal to"
+                " the number of edges."
+            )
+        # Store the edge and node features
+        self.node_features = node_features
+        self.edge_features = edge_features
 
     def to(
         self: GeometricPolymer,
@@ -448,72 +385,65 @@ class PolymerDistance(nn.Module):
 
 class PolymerDataset(tdata.Dataset):
     """
-    Load a single polymer from a directory of PDB files.
+    Load polymers from a .nc file, alongside additional data specified
+    by the user.
     """
 
     def __init__(
         self: PolymerDataset,
-        directory: str,
-        energy_file: str,
-        edge_degree: int,
-        suffix: str = '.pdb',
+        file: str,
+        atom_features: list[str] = [],
+        residue_features: list[str] = [],
+        chain_features: list[str] = [],
+        molecule_features: list[str] = [],
+        edge_features: list[str] = [],
     ) -> None:
 
-        # Get the names of all the PDB files
-        self.files = [
-            directory + '/' + file
-            for file in os.listdir(directory)
-            if file.endswith(suffix)
-        ]
-        if not self.files:
-            raise RuntimeError(
-                f"The direcotry {directory} does not contain"
-                " any PDB files."
-            )
-        # Store the edge degree
-        self.degree = edge_degree
-        # Get the additional features
-        self.ds = xr.load_dataset(energy_file)
+        self.structures = StructureDataset(
+            file,
+            atom_features,
+            residue_features,
+            chain_features,
+            molecule_features,
+            edge_features,
+        )
 
-    def shuffle(
+    def __getitem__(
         self: PolymerDataset,
-    ) -> None:
+        ix: int | slice,
+    ) -> tuple[Polymer, *tuple[torch.Tensor, ...]]:
         """
-        Shuffle the files in the dataset.
+        Return the polymer alongside the requested features.
         """
 
-        ix = np.random.permutation(len(self))
-        self.files = [self.files[i] for i in ix]
-        self.ds = self.ds.isel(ix)
+        # Load the raw data
+        (
+            coordinates,
+            edges,
+            residue_ix,
+            chain_ix,
+            molecule_ix,
+            *user_features
+        ) = self.structures[ix]
+        # Construct the graph from the edges
+        graph = dgl.graph(
+            (edges[:, 0], edges[:, 1])
+        )
+        # Construct the polymer
+        polymer = Polymer(
+            coordinates,
+            graph,
+            residue_ix,
+            chain_ix,
+            molecule_ix,
+        )
+        return polymer, *user_features
 
     def __len__(
         self: PolymerDataset,
     ) -> int:
         """
-        The number of PDB files in the folder.
+        Return the number of molecules in the dataset.
         """
 
-        return len(self.files)
-
-    def __getitem__(
-        self: PolymerDataset,
-        ix: int,
-    ) -> tuple[GeometricPolymer, torch.Tensor]:
-        """
-        Get the PDB file at index ix and create a GeometricPolyemr
-        from it.
-        """
-
-        polymer = GeometricPolymer.from_pdb(
-            self.files[ix],
-            self.degree,
-        )
-
-        file_number = int(Path(
-            self.files[ix]
-        ).stem)
-        energy = torch.tensor(
-            self.ds['energy'].values[file_number]
-        )
-
-        return polymer, energy
+        return len(self.structures)
