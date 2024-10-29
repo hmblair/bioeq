@@ -193,7 +193,7 @@ def create_structure_dataset(
         prev_molecule_ix += 1
 
         edge_molecule_ix_ls.append(
-            np.ones(bond_edges.shape[0]) * prev_molecule_ix
+            np.ones(bond_edges.shape[0]) * prev_edge_molecule_ix
         )
         prev_edge_molecule_ix += 1
 
