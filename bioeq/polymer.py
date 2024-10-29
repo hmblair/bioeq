@@ -10,7 +10,7 @@ from torch_scatter import (
     scatter_max as t_scatter_max,
     scatter_min as t_scatter_min,
 )
-from data import StructureDataset
+from .data import StructureDataset
 from copy import copy
 
 NODE_DIM = 0
