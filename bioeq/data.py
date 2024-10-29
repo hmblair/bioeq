@@ -84,7 +84,7 @@ def read_structure(
     bond_types = bonds[:, 2]
     # Get the elements as integers
     elements = np.array([
-        ELEMENT_IX[element]
+        ELEMENT_IX.get(element, 0)
         for element in struct.element
     ]).astype(np.int64)
     # Get the residues as integers
