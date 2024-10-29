@@ -6,15 +6,15 @@ from torch.utils.cpp_extension import (
     include_paths,
 )
 
-NAME = 'bioeq_devel'
+NAME = 'bioeq'
 VERSION = '0.1.0'
 LICENSE = 'CC BY-NC 4.0'
 FILES = [
-    'bioeq_devel/kernel/src/bind.cpp',
-    'bioeq_devel/kernel/src/kernel.cu',
+    'bioeq/kernel/src/bind.cpp',
+    'bioeq/kernel/src/kernel.cu',
 ]
 
-KERNEL_NAME = 'bioeq_devel.kernel._C'
+KERNEL_NAME = 'bioeq.kernel._C'
 # Conditionally add the CUDA extension if CUDA is available
 ext_modules = []
 if torch.cuda.is_available():
