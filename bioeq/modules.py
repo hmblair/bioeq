@@ -562,7 +562,7 @@ class EquivariantTransformer(nn.Module):
         in_repr: Repr,
         out_repr: Repr,
         hidden_repr: Repr,
-        nlayers: int,
+        hidden_layers: int,
         edge_dim: int,
         edge_hidden_dim: int,
         nheads: int = 1,
@@ -577,9 +577,13 @@ class EquivariantTransformer(nn.Module):
         self.nheads = nheads
         self.dropout = dropout
         self.attn_dropout = attn_dropout
+        # Store the representations
+        self.in_repr = in_repr
+        self.out_repr = out_repr
+        self.hidden_repr = hidden_repr
 
         # Get the sequence of reprs the model passes through
-        reprs = [in_repr] + [hidden_repr] * nlayers + [out_repr]
+        reprs = [in_repr] + [hidden_repr] * hidden_layers + [out_repr]
         # Create the layers to move between these representations. Store
         # the product reprs involved
         layers = []
@@ -648,6 +652,13 @@ class EquivariantTransformer(nn.Module):
         """
         Apply the equivariant transformer to the input geometric graph.
         """
+
+        if not self.in_repr.verify(node_features):
+            raise ValueError(
+                "The given node features have shape"
+                f" {node_features.size()}, which does not"
+                " match the input representation."
+            )
 
         # Get the basis elements
         bases = self.bases.edgewise(
