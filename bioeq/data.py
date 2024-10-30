@@ -53,6 +53,24 @@ INDEX_VARS = [
     EDGE_IX_KEY,
 ]
 
+DIMENSION_VARS = [
+    ATOM_DIM,
+    RESIDUE_DIM,
+    CHAIN_DIM,
+    MOLECULE_DIM,
+    EDGE_DIM,
+]
+
+
+def bullets(
+    strings: list[str],
+    offset: int = 0,
+) -> str:
+    """
+    Convert a list of strings to a bullet point list.
+    """
+    return " " * offset + ("\n" + " " * offset).join(f"- {s}" for s in strings)
+
 
 def proportional_slices(
     proportions: Iterable[float],
@@ -347,8 +365,9 @@ class StructureDataset:
         dropped_features: list[str] = INDEX_VARS,
     ) -> None:
 
-        # Store the device to use
+        # Store the device to use and the file
         self.device = device
+        self.file = file
         # Store which features we will be loading
         self.user_features = (
             atom_features +
@@ -579,3 +598,25 @@ class StructureDataset:
         # Save the new datasets
         for ds, filename in zip(datasets, filenames):
             ds.to_netcdf(filename)
+
+    def __repr__(
+        self: StructureDataset,
+    ) -> str:
+        """
+        Print the available variables in the dataset.
+        """
+
+        out_str = "\nPolymerDataset\n"
+        out_str += f'  file: {self.file}\n'
+        out_str += 'Available variables:\n'
+
+        for dim in DIMENSION_VARS:
+            out = [
+                var for var in self.ds.data_vars
+                if dim in self.ds[var].dims
+            ]
+            if out:
+                out_str += ("  " + dim + '\n')
+                out_str += bullets(out, 4) + '\n'
+
+        return out_str
