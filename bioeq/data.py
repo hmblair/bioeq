@@ -9,6 +9,7 @@ import numpy as np
 import os
 import xarray as xr
 from pathlib import Path
+from tqdm import tqdm
 
 ELEMENT_IX = {
     "H": 0,
@@ -81,6 +82,28 @@ def read_structure(
         )
     bond_edges = bonds[:, 0:2]
     bond_types = bonds[:, 2]
+    # Add self and reverse edges too
+    self_edges = np.tile(
+        np.arange(coordinates.shape[0])[:, None],
+        (1, 2)
+    )
+    self_bond_types = np.zeros(
+        coordinates.shape[0]
+    )
+    bond_edges = np.concatenate(
+        [bond_edges,
+         bond_edges[:, ::-1],
+         self_edges],
+        axis=0
+    )
+    bond_types = np.concatenate(
+        [bond_types,
+         bond_types,
+         self_bond_types,
+         ],
+        axis=0
+    )
+
     # Get the elements as integers
     elements = np.array([
         ELEMENT_IX.get(element, 0)
@@ -151,7 +174,10 @@ def create_structure_dataset(
     prev_molecule_ix = 0
     prev_edge_molecule_ix = 0
 
-    for file in os.listdir(directory):
+    for file in tqdm(
+        os.listdir(directory),
+        desc=f'Reading {extension} files'
+    ):
 
         if not file.endswith(extension):
             continue
@@ -321,16 +347,30 @@ class StructureDataset:
         self.edges_per_molecule = torch.bincount(
             self.edge_ix
         )
+
         # Get the number of residues and chains per molecule
         molecule_indices = torch.arange(self.molecule_ix.max().item() + 1)
-        self.residues_per_molecule = torch.tensor([
-            torch.unique(self.residue_ix[self.molecule_ix == mol_ix]).shape[0]
-            for mol_ix in molecule_indices
-        ])
-        self.chains_per_molecule = torch.tensor([
-            torch.unique(self.chain_ix[self.molecule_ix == mol_ix]).shape[0]
-            for mol_ix in molecule_indices
-        ])
+        # Create a 2D tensor of (molecule, residue) pairs
+        molecule_residue_pairs = torch.stack(
+            [self.molecule_ix, self.residue_ix], dim=1)
+        # Find unique pairs, then count unique residues per molecule
+        unique_pairs = torch.unique(molecule_residue_pairs, dim=0)
+        # Count residues per molecule by binning unique molecule indices
+        self.residues_per_molecule = torch.bincount(
+            unique_pairs[:, 0],
+            minlength=molecule_indices.numel(),
+        )
+        # Create a 2D tensor of (molecule, chain) pairs
+        molecule_chain_pairs = torch.stack(
+            [self.molecule_ix, self.chain_ix], dim=1)
+        # Find unique pairs, then count unique chains per molecule
+        unique_pairs = torch.unique(molecule_chain_pairs, dim=0)
+        # Count residues per molecule by binning unique molecule indices
+        self.chains_per_molecule = torch.bincount(
+            unique_pairs[:, 0],
+            minlength=molecule_indices.numel(),
+        )
+
         # Get the starting position of each atom group in the dataset
         self.atom_starts = padded_cumsum(
             self.atoms_per_molecule
