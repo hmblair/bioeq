@@ -474,3 +474,12 @@ class PolymerDataset(tdata.Dataset):
         """
 
         return len(self.structures)
+
+    def __repr__(
+        self: PolymerDataset,
+    ) -> str:
+        """
+        Get the underlying StructureDataset's string.
+        """
+
+        return self.structures.__repr__()
