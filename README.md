@@ -60,15 +60,15 @@ residues = elem_embedding(residues.long())
 node_features = torch.cat([elements, residues], dim=-1)
 ```
 
+For the edge features, we can compute the distance between all atoms which are connected by an edge.
+```
+edge_features = polymer.pdist()
+```
+
 Unsqueeze the final dimension, since the model will expect three dimensions for the node features and two for the edge features
 ```
 node_features = node_features[..., None]
 edge_features = edge_features[..., None]
-```
-
-For the edge features, we can compute the distance between all atoms which are connected by an edge.
-```
-edge_features = polymer.pdist()
 ```
 
 We can now create our `GeometricPolymer`.

@@ -1,6 +1,5 @@
 from __future__ import annotations
 from typing import Iterable
-from numpy.core.defchararray import startswith
 import torch
 from biotite.structure.io import load_structure
 from biotite.structure import (
