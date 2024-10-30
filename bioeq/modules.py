@@ -629,6 +629,9 @@ class EquivariantTransformer(nn.Module):
         Apply the forward method to a geometric polymer.
         """
 
+        # Center the coordinates as is necessary for translational
+        # invariance
+        polymer.center()
         # Copy the polymer so as not to overwrite the input
         polymer = copy(polymer)
         # Update the node features
