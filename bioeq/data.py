@@ -1,4 +1,6 @@
 from __future__ import annotations
+from typing import Iterable
+from numpy.core.defchararray import startswith
 import torch
 from biotite.structure.io import load_structure
 from biotite.structure import (
@@ -44,6 +46,45 @@ CHAIN_IX_KEY = 'chain_ix'
 MOLECULE_IX_KEY = 'molecule_ix'
 EDGE_IX_KEY = 'edge_ix'
 ID_KEY = 'id'
+
+INDEX_VARS = [
+    RESIDUE_IX_KEY,
+    CHAIN_IX_KEY,
+    MOLECULE_IX_KEY,
+    EDGE_IX_KEY,
+]
+
+
+def proportional_slices(
+    proportions: Iterable[float],
+    total_length: int,
+) -> list[slice]:
+
+    if not sum(proportions) <= 1:
+        raise ValueError(
+            "The proportions must have a sum of at most"
+            " one."
+        )
+
+    counts = [
+        int(p * total_length)
+        for p in proportions
+    ]
+
+    # Adjust for any rounding differences
+    remainder = total_length - sum(counts)
+    for i in range(remainder):
+        counts[i] += 1
+
+    # Generate slices
+    slices = []
+    start = 0
+    for count in counts:
+        end = start + count
+        slices.append(slice(start, end))
+        start = end
+
+    return slices
 
 
 def read_structure(
@@ -172,6 +213,7 @@ def create_structure_dataset(
     prev_residue_ix = 0
     prev_chain_ix = 0
     prev_molecule_ix = 0
+    prev_edge_ix = 0
     prev_edge_molecule_ix = 0
 
     for file in tqdm(
@@ -200,7 +242,10 @@ def create_structure_dataset(
         coordinates_ls.append(coordinates)
         residues_ls.append(residues)
         elements_ls.append(elements)
-        bond_edges_ls.append(bond_edges)
+        bond_edges_ls.append(
+            bond_edges + prev_edge_ix
+        )
+        prev_edge_ix += coordinates.shape[0]
         bond_types_ls.append(bond_types)
 
         residue_ix_ls.append(
@@ -300,6 +345,7 @@ class StructureDataset:
         chain_features: list[str] = [],
         molecule_features: list[str] = [],
         edge_features: list[str] = [],
+        dropped_features: list[str] = INDEX_VARS,
     ) -> None:
 
         # Store the device to use
@@ -327,13 +373,8 @@ class StructureDataset:
         self.edge_ix = torch.from_numpy(
             self.ds[EDGE_IX_KEY].values
         )
-        # Drop these variables from the dataset to save memory
-        self.ds = self.ds.drop_vars([
-            RESIDUE_IX_KEY,
-            CHAIN_IX_KEY,
-            MOLECULE_IX_KEY,
-            EDGE_IX_KEY,
-        ])
+        # Drop variables from the dataset
+        self.ds = self.ds.drop_vars(dropped_features)
         # Get the sizes of the groups of atoms
         self.residue_sizes = torch.bincount(
             self.residue_ix
@@ -390,11 +431,11 @@ class StructureDataset:
             ATOM_DIM: self.atom_starts,
             EDGE_DIM: self.edge_starts,
         })
-        if residue_features:
+        if RESIDUE_DIM in self.ds.dims:
             self.slicer.arrays[RESIDUE_DIM] = self.residue_starts
-        if chain_features:
+        if CHAIN_DIM in self.ds.dims:
             self.slicer.arrays[CHAIN_DIM] = self.chain_starts
-        if molecule_features:
+        if MOLECULE_DIM in self.ds.dims:
             self.slicer.arrays[MOLECULE_DIM] = self.molecule_starts
 
     def __getitem__(
@@ -454,6 +495,7 @@ class StructureDataset:
             dtype=torch.long,
             device=self.device,
         )
+        edges = edges - atom_slice.start
         user_features = [
             feature.to(self.device)
             for feature in user_features
@@ -512,3 +554,29 @@ class StructureDataset:
         """
 
         return self.num_molecules()
+
+    def split(
+        self: StructureDataset,
+        props: list[float],
+        filenames: list[str],
+    ) -> list[xr.Dataset]:
+        """
+        Split the underlying dataset into len(props) datasets containing
+        the respective portion of the data.
+        """
+
+        orig_slices = proportional_slices(
+            props, len(self),
+        )
+
+        datasets = []
+        for orig_slice in orig_slices:
+            start = orig_slice.start
+            stop = orig_slice.stop
+            data_slice = self.slicer(start, stop)
+            datasets.append(
+                self.ds.isel(data_slice)
+            )
+        # Save the new datasets
+        for ds, filename in zip(datasets, filenames):
+            ds.to_netcdf(filename)
