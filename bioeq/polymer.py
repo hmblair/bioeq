@@ -176,6 +176,22 @@ class Polymer:
         # Expand the means and subtract
         self.coordinates = self.coordinates - coord_means[self.molecule_ix]
 
+    def pdist(
+        self: Polymer,
+    ) -> None:
+        """
+        Get the pairwise distances between all coordinates which are
+        connected by an edge.
+        """
+
+        # Get the edges from the graph
+        U, V = self.graph.edges()
+        # Compute the pairwise norms
+        return torch.linalg.norm(
+            self.coordinates[U] - self.coordinates[V],
+            dim=-1
+        )
+
     def connect(
         self: Polymer,
         num_neighbours: int,
@@ -392,6 +408,7 @@ class PolymerDataset(tdata.Dataset):
     def __init__(
         self: PolymerDataset,
         file: str,
+        device: str = 'cpu',
         atom_features: list[str] = [],
         residue_features: list[str] = [],
         chain_features: list[str] = [],
@@ -399,14 +416,18 @@ class PolymerDataset(tdata.Dataset):
         edge_features: list[str] = [],
     ) -> None:
 
+        # Initialise the base dataset
         self.structures = StructureDataset(
             file,
+            device,
             atom_features,
             residue_features,
             chain_features,
             molecule_features,
             edge_features,
         )
+        # Store which device to move the outputs to
+        self.device = device
 
     def __getitem__(
         self: PolymerDataset,

@@ -19,15 +19,14 @@ ELEMENT_IX = {
     "D": 0,
 }
 NUM_ELEMENTS = len(ELEMENT_IX)
-RES_IX = {
+NUCLEOTIDE_RES_IX = {
     "A": 0,
     "C": 1,
     "G": 2,
     "T": 3,
     "U": 3,
 }
-NUM_RES = len(RES_IX)
-PDB_SUFFIX = '.pdb'
+NUM_NUCLEOTIDE_RES = len(NUCLEOTIDE_RES_IX)
 
 ATOM_DIM = 'atom'
 RESIDUE_DIM = 'residue'
@@ -89,7 +88,7 @@ def read_structure(
     ]).astype(np.int64)
     # Get the residues as integers
     residues = np.array([
-        RES_IX.get(res, -1)
+        NUCLEOTIDE_RES_IX.get(res, -1)
         for res in struct.res_name
     ]).astype(np.int64)
     # Get which residue each atom belongs to
@@ -269,6 +268,7 @@ class StructureDataset:
     def __init__(
         self: StructureDataset,
         file: str,
+        device: str = 'cpu',
         atom_features: list[str] = [],
         residue_features: list[str] = [],
         chain_features: list[str] = [],
@@ -276,6 +276,8 @@ class StructureDataset:
         edge_features: list[str] = [],
     ) -> None:
 
+        # Store the device to use
+        self.device = device
         # Store which features we will be loading
         self.user_features = (
             atom_features +
@@ -403,10 +405,23 @@ class StructureDataset:
             torch.Tensor(data[feature].values)
             for feature in self.user_features
         ]
+        # Move to the correct datatype and device
+        coordinates = coordinates.to(
+            dtype=torch.float32,
+            device=self.device,
+        )
+        edges = edges.to(
+            dtype=torch.long,
+            device=self.device,
+        )
+        user_features = [
+            feature.to(self.device)
+            for feature in user_features
+        ]
         # Return, including the relevant indices as well
         return (
-            coordinates.to(torch.float32),
-            edges.long(),
+            coordinates,
+            edges,
             residue_ix.long(),
             chain_ix.long(),
             molecule_ix.long(),
