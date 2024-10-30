@@ -30,29 +30,40 @@ polymer, elements, residues = dataset[0:5]
 Print the polymer:
 ```
 Polymer:
-    num_molecules:    1
-    num_chains:       1
-    num_residues:     88
-    num_atoms:        2808
-    num_edges:        44928
+    num_molecules:    5
+    num_chains:       7
+    num_residues:     153
+    num_atoms:        3258
+    num_edges:        10532
 ```
 
 The easiest way to train a model with this information as input is to create a `GeometricPolymer` object. This is a `Polymer` object in combination with 
-    1. node features, and
-    2. edge features.
+
+* node features, of shape (num_atoms, num_features, degrees)
+* edge features, of shape (num_edge, num_features).
+
 To create it, we need to compute some initial node and edge features.
 
 The node features we can create by passing each of the elements and residues through an embedding layer.
 ```
-import torch.nn
+import torch
+import torch.nn as nn
 
+# Create a separate embedding for the elements and the residues, both of size
+# four
 elem_embedding = nn.Embedding(5, 4)
 residue_embedding = nn.Embedding(4, 4)
 
-elements = elem_embedding(elements)
-residues = elem_embedding(residues)
-
+# Pass through the embeddings and concatenate to get the node features
+elements = elem_embedding(elements.long())
+residues = elem_embedding(residues.long())
 node_features = torch.cat([elements, residues], dim=-1)
+```
+
+Unsqueeze the final dimension, since the model will expect three dimensions for the node features and two for the edge features
+```
+node_features = node_features[..., None]
+edge_features = edge_features[..., None]
 ```
 
 For the edge features, we can compute the distance between all atoms which are connected by an edge.
@@ -74,11 +85,11 @@ geom_polymer = GeometricPolymer(
 Print the geometric polymer;
 ```
 GeometricPolymer:
-    num_molecules:    1
-    num_chains:       1
-    num_residues:     88
-    num_atoms:        2808
-    num_edges:        44928
+    num_molecules:    5
+    num_chains:       7
+    num_residues:     153
+    num_atoms:        3258
+    num_edges:        10532
     node_features:
         repr dim:     1
         multiplicity: 8
@@ -89,7 +100,7 @@ Create a degree-0 representation of multiplicity 8 for our input features, and a
 ```
 from bioeq.geom import Repr
 
-in_repr = Repr([0], 1)
+in_repr = Repr([0], 8)
 out_repr = Repr([1], 4)
 hidden_repr = Repr([0, 1], 16)
 ```
@@ -120,11 +131,11 @@ out_geom_polymer = transformer.polymer(geom_polymer)
 Print the output geometric polymer;
 ```
 GeometricPolymer:
-    num_molecules:    1
-    num_chains:       1
-    num_residues:     88
-    num_atoms:        2808
-    num_edges:        44928
+    num_molecules:    5
+    num_chains:       7
+    num_residues:     153
+    num_atoms:        3258
+    num_edges:        10532
     node_features:
         repr dim:     3
         multiplicity: 4
