@@ -6,20 +6,72 @@ To install, clone the repo and install with `pip`.
 ```
 git clone https://github.com/hmblair/bioeq
 cd bioeq
-pip install .
+pip3 install .
 ```
 
 # Usage
-Import the `GeometricPolymer` class, and load the example PDB with a nearest-neighbour edge degree of 16.
+
+A `Polymer` is a class which contains the coordinates and edges of a molecule or a set of molecules,as well as information on which chain and residue each molecule belongs to. The `PolymerDataset` will load `Polymer`s from a valid `.nc` file that was created with `create_structure_dataset`. It will also load any other features specified at instantiation.
+```
+from bioeq.polymer import PolymerDataset
+
+# Create a PolymerDataset class, and request that it load the 'elements'
+# and 'residues' features too
+file = 'examples/polymers.nc'
+dataset = PolymerDataset(
+    file=file,
+    atom_features=['elements', 'residues']
+)
+
+# Load the first five polymers and associated data
+polymer, elements, residues = dataset[0:5]
+```
+
+Print the polymer:
+```
+Polymer:
+    num_molecules:    1
+    num_chains:       1
+    num_residues:     88
+    num_atoms:        2808
+    num_edges:        44928
+```
+
+The easiest way to train a model with this information as input is to create a `GeometricPolymer` object. This is a `Polymer` object in combination with 
+    1. node features, and
+    2. edge features.
+To create it, we need to compute some initial node and edge features.
+
+The node features we can create by passing each of the elements and residues through an embedding layer.
+```
+import torch.nn
+
+elem_embedding = nn.Embedding(5, 4)
+residue_embedding = nn.Embedding(4, 4)
+
+elements = elem_embedding(elements)
+residues = elem_embedding(residues)
+
+node_features = torch.cat([elements, residues], dim=-1)
+```
+
+For the edge features, we can compute the distance between all atoms which are connected by an edge.
+```
+edge_features = polymer.pdist()
+```
+
+We can now create our `GeometricPolymer`.
 ```
 from bioeq.polymer import GeometricPolymer
 
-file = 'examples/6xrz.pdb'
-edge_degree = 16
-polymer = GeometricPolymer.from_pdb(file, edge_degree)
+geom_polymer = GeometricPolymer(
+    polymer,
+    node_features,
+    edge_features,
+)
 ```
 
-Print the polymer;
+Print the geometric polymer;
 ```
 GeometricPolymer:
     num_molecules:    1
@@ -29,12 +81,11 @@ GeometricPolymer:
     num_edges:        44928
     node_features:
         repr dim:     1
-        multiplicity: 1
+        multiplicity: 8
     edge_feature dim: 1
 ```
-By default, the node features are initialised to a single degree-0 feature, which is the element type. Likewise, the edge features are initialised using the pairwise distances.
 
-Create a single degree-0 representation for our input features, and a degree-1 representation with multiplicity 4 as an example output. Also, create a hidden representation with degrees 0 and 1, and multiplicity 16.
+Create a degree-0 representation of multiplicity 8 for our input features, and a degree-1 representation with multiplicity 4 as an example output. Also, create a hidden representation with degrees 0 and 1, and multiplicity 16.
 ```
 from bioeq.geom import Repr
 
@@ -49,13 +100,13 @@ from bioeq.modules import EquivariantTransformer
 
 edge_dim = 1
 edge_hidden_dim = 16
-nlayers = 2
+hidden_layers = 2
 
 transformer = EquivariantTransformer(
    in_repr,
    out_repr,
    hidden_repr,
-   nlayers,
+   hidden_layers,
    edge_dim,
    edge_hidden_dim,
 )
@@ -63,10 +114,10 @@ transformer = EquivariantTransformer(
 
 Pass the polymer to the equivariant transformer to get a new set of node features.
 ```
-out_polymer = transformer.polymer(polymer)
+out_geom_polymer = transformer.polymer(geom_polymer)
 ```
 
-Print the output polymer;
+Print the output geometric polymer;
 ```
 GeometricPolymer:
     num_molecules:    1
@@ -80,4 +131,4 @@ GeometricPolymer:
     edge_feature dim: 1
 ```
 
-Note how the node features have changed in degree and multiplicity, but the structure of the molecule has remained teh same, as have the edge features.
+Note how the node features have changed in degree and multiplicity, but the structure of the molecule has remained the same, as have the edge features.
