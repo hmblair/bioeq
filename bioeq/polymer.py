@@ -62,6 +62,9 @@ class Polymer:
             self.molecule_ix
         )
 
+        # Keep track of whether the molecule is centered
+        self.is_centered = False
+
     def residue_reduce(
         self: Polymer,
         features: torch.Tensor,
@@ -171,10 +174,13 @@ class Polymer:
         Center the coordinates of each molecule in the polymer.
         """
 
-        # Get the coordinate means
-        coord_means = self.molecule_reduce(self.coordinates)
-        # Expand the means and subtract
-        self.coordinates = self.coordinates - coord_means[self.molecule_ix]
+        if not self.is_centered:
+            # Get the coordinate means
+            coord_means = self.molecule_reduce(self.coordinates)
+            # Expand the means and subtract
+            self.coordinates = self.coordinates - coord_means[self.molecule_ix]
+            # We are now centered
+            self.is_centered = True
 
     def pdist(
         self: Polymer,
