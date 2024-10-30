@@ -25,7 +25,8 @@ dataset = PolymerDataset(
     atom_features=['elements', 'residues']
 )
 
-# Load the first five polymers and associated data
+# Load the first five polymers and associated data. Notice how the elements
+# are loaded in the same order that they were passed to the constructor.
 polymer, elements, residues = dataset[0:5]
 ```
 
