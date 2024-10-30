@@ -1,5 +1,7 @@
 # Overview
-`bioeq` is a set of tools for doing geometric deep learning with a focus on applications to structural biology. The core datatype it exposes is the `GeometricPolymer`, which contains node and edge information at varying levels of coarseness. A set of equivariant deep learning layers, including an equivariant transformer, allow for transformations of these polymers to be learned.
+`bioeq` is a set of tools for doing geometric deep learning with a focus on applications to structural biology. The core datatypes it exposes are the `Polymer` and `GeometricPolymer`, which contain information on the position and connectivity of atoms in one or more molecules, and a suite of tools for computing data at the atom, residue, chain, and molecule level. The latter also has node and edge features, suitable for processing by a geometric deep learning model.
+
+A set of equivariant deep learning layers, including an equivariant transformer, allow for transformations of these polymers to be learned.
 
 # Installation
 To install, clone the repo and install with `pip`.
@@ -11,7 +13,7 @@ pip3 install .
 
 # Usage
 
-A `Polymer` is a class which contains the coordinates and edges of a molecule or a set of molecules,as well as information on which chain and residue each molecule belongs to. The `PolymerDataset` will load `Polymer`s from a valid `.nc` file that was created with `create_structure_dataset`. It will also load any other features specified at instantiation.
+A `Polymer` is a class which contains the coordinates and edges of a molecule or a set of molecules, as well as information on which chain and residue each molecule belongs to. The `PolymerDataset` will load `Polymer`s from a valid `.nc` file that was created with `create_structure_dataset`. It will also load any other features specified at instantiation.
 ```
 from bioeq.polymer import PolymerDataset
 
