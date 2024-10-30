@@ -184,7 +184,7 @@ class Polymer:
 
     def pdist(
         self: Polymer,
-    ) -> None:
+    ) -> torch.Tensor:
         """
         Get the pairwise distances between all coordinates which are
         connected by an edge.
