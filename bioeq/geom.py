@@ -991,6 +991,7 @@ class EquivariantBasis(nn.Module):
 
 
 class EquivariantBases(nn.Module):
+
     def __init__(self: EquivariantBases, *reprs: ProductRepr) -> None:
         super().__init__()
 
@@ -1078,7 +1079,7 @@ class EquivariantBases(nn.Module):
         sh = self.sh(x)
         # Matrix multiplication
         ms = [
-            self._mm(sh, getattr(self, f"coupling_{i}"), outdims)
+            self._mm(sh, self.get_buffer(f"coupling_{i}"), outdims)
             for i, outdims in enumerate(self.outdims)
         ]
         # Expand to the required number of outputs without a new calculation

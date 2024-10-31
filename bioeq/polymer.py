@@ -113,38 +113,42 @@ class Polymer:
             dim=NODE_DIM,
         )
 
-    def bond_mask(
+    def causal_mask(
         self: Polymer,
-        mask: torch.Tensor | None = None,
         reverse: bool = False,
     ) -> torch.Tensor:
         """
-        Convert a residue-wise mask into an atom-wise mask. If no mask is
-        passed, then it is assumed to be a causal mask. If the mask is causal,
-        causality can be reversed using the reverse bool.
+        Create an edge mask so that information can only flow forward
+        through the polymer, and not backward.
         """
 
         # Push the residue indices to the edges
         U, V = self.graph.edges()
         residue_U, residue_V = self.residue_ix[U], self.residue_ix[V]
-        # Create a causal mask if none is specified
-        if mask is None:
-            if reverse:
-                return residue_U >= residue_V
-            else:
-                return residue_U <= residue_V
+        # Create a causal mask
+        if reverse:
+            return residue_U >= residue_V
+        else:
+            return residue_U <= residue_V
+
+    def bond_mask(
+        self: Polymer,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Mask all information flowing from the specified nucleotides.
+        """
+
+        # Push the residue indices to the edges
+        U, _ = self.graph.edges()
+        residue_U = self.residue_ix[U]
         # Get the nodes participating in the masking
-        mask_U, mask_V = torch.nonzero(mask).chunk(2, dim=UV_DIM)
-        mask_U = mask_U.squeeze(1)
-        mask_V = mask_V.squeeze(1)
-        # If position (i,j) is masked, then we need to prevent
-        # resuidue i from passing messages to residue j. To do
-        # this, we need to find all edges starting within residue
-        # i and ending within residue j.
-        src_mask = (residue_U[:, None] == mask_U[None, :])
-        dst_mask = (residue_V[:, None] == mask_V[None, :])
-        # Return true if any edge connects a masked pair of residues
-        return (src_mask & dst_mask).any(UV_DIM)
+        mask_U = torch.nonzero(mask).squeeze(1)
+        # Find all edges beginning in a masked residue
+        edge_mask = (residue_U[:, None] == mask_U[None, :])
+        return torch.logical_not(
+            edge_mask.any(UV_DIM)
+        )
 
     def relpos(
         self: Polymer,
@@ -229,6 +233,9 @@ class Polymer:
         # Move all relevant tensors to the device
         new.coordinates = self.coordinates.to(device)
         new.graph = self.graph.to(device)
+        new.residue_ix = self.residue_ix.to(device)
+        new.chain_ix = self.chain_ix.to(device)
+        new.molecule_ix = self.molecule_ix.to(device)
         return new
 
     def __repr__(
@@ -299,9 +306,12 @@ class GeometricPolymer(Polymer):
         new = copy(self)
         # Move all relevant tensors to the device
         new.coordinates = self.coordinates.to(device)
+        new.graph = self.graph.to(device)
+        new.residue_ix = self.residue_ix.to(device)
+        new.chain_ix = self.chain_ix.to(device)
+        new.molecule_ix = self.molecule_ix.to(device)
         new.node_features = self.node_features.to(device)
         new.edge_features = self.edge_features.to(device)
-        new.graph = self.graph.to(device)
         return new
 
     def __repr__(
