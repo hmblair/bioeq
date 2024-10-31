@@ -152,7 +152,7 @@ class Polymer:
 
     def relpos(
         self: Polymer,
-        max: int | None = None,
+        max: int,
     ) -> torch.Tensor:
         """
         Return a 1D tensor of length self.num_edges containing the
@@ -164,12 +164,10 @@ class Polymer:
         U, V = self.graph.edges()
         # Compute the distance in the sequence
         relpos = self.residue_ix[V] - self.residue_ix[U]
-        # Clamp if a maximum distance is given
-        if max is not None:
-            relpos = torch.clamp(
-                relpos, -max, max
-            )
-        return relpos
+        # Clamp to the maximum distance
+        return torch.clamp(
+            relpos, -max, max
+        ) + max
 
     def center(
         self: Polymer,
