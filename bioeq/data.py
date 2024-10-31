@@ -505,6 +505,9 @@ class StructureDataset:
             for feature in self.user_features
         ]
         # Move to the correct datatype and device
+        residue_ix = residue_ix.to(self.device)
+        chain_ix = chain_ix.to(self.device)
+        molecule_ix = molecule_ix.to(self.device)
         coordinates = coordinates.to(
             dtype=torch.float32,
             device=self.device,
