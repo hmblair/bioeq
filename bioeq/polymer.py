@@ -346,17 +346,23 @@ def polymer_kabsch_distance(
         raise ValueError(
             "Both GeometricPolymers must have the same number of molecules."
         )
-    # Center the coordinates
+    # Center and extract the coordinates
     polymer1.center()
+    coords1 = polymer1.coordinates
     polymer2.center()
+    coords2 = polymer2.coordinates
+    # Weight the coordinates if necessary
+    if weight is not None:
+        weight = torch.sqrt(
+            weight / weight.mean()
+        )
+        coords1 = coords1 * weight[:, None]
+        coords2 = coords2 * weight[:, None]
     # Get the outer product of the coordinates
     outer_prod = torch.multiply(
-        polymer1.coordinates[:, None, :],
-        polymer2.coordinates[:, :, None],
+        coords1[:, None, :],
+        coords2[:, :, None],
     )
-    # Weight the nodes if provided
-    if weight is not None:
-        outer_prod = outer_prod * weight[:, None]
     # Compute the per-molecule covariance matrices
     cov = t_scatter_mean(
         outer_prod,
@@ -373,10 +379,10 @@ def polymer_kabsch_distance(
     sigma = sigma.mean(-1)
     # Get the variances of the point clouds
     var1 = polymer1.molecule_reduce(
-        polymer1.coordinates ** 2
+        coords1 ** 2
     ).mean(-1)
     var2 = polymer2.molecule_reduce(
-        polymer2.coordinates ** 2
+        coords2 ** 2
     ).mean(-1)
     # Compute the kabsch distance
     return (var1 + var2 - 2 * sigma)
@@ -400,16 +406,21 @@ class PolymerDistance(nn.Module):
         self: PolymerDistance,
         polymer1: GeometricPolymer,
         polymer2: GeometricPolymer,
+        weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Compute the mean aligned distance. The two polymers must have the same
         number of molecules and the same molecule indices.
         """
 
+        # The input weight overrides the class weight
+        if weight is None:
+            weight = self.weight
+
         return polymer_kabsch_distance(
             polymer1,
             polymer2,
-            self.weight,
+            weight,
         ).mean()
 
 
