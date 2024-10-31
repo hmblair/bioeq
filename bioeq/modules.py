@@ -62,12 +62,12 @@ class EquivariantLinear(nn.Module):
         # Store the dimensions used in the indexing
         self.expanddims = (
             1,
-            repr.mult,
+            out_repr.mult,
             repr.dim(),
         )
         self.outdims = (
             repr.nreps(),
-            repr.mult,
+            out_repr.mult,
             repr.dim(),
         )
         # Create a dropout object
@@ -349,6 +349,7 @@ class GraphAttention(nn.Module):
         queries: torch.Tensor,
         values: torch.Tensor,
         mask: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Take a set of keys, queries and values of shape (e, f), (e, f) and
@@ -367,6 +368,9 @@ class GraphAttention(nn.Module):
         # Compute the attention weights
         weights = dgl.ops.edge_softmax(graph, scores)
         weights = self.dropout(weights)
+        # Bias the values of a bias is provided
+        if bias is not None:
+            weights = weights + bias
         # Mask the values if a mask is provided
         if mask is not None:
             weights = weights * mask[:, None]
@@ -427,6 +431,7 @@ class EquivariantAttention(nn.Module):
         edge_feats: torch.Tensor,
         f: torch.Tensor,
         mask: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         The forward pass.
@@ -436,7 +441,7 @@ class EquivariantAttention(nn.Module):
         conv = self.conv(graph, basis, edge_feats, f)
         k, q, v = torch.chunk(conv, 3, FEATURE_DIM)
         # Graph attention
-        attn_out = self.attn(graph, k, q, v, mask)
+        attn_out = self.attn(graph, k, q, v, mask, bias)
         # Undo any reshapes performed by the attention layer
         return attn_out.view(graph.num_nodes(), *self.outdims)
 
@@ -536,6 +541,7 @@ class EquivariantTransformerBlock(nn.Module):
         features: torch.Tensor,
         edge_feats: torch.Tensor,
         mask: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         # Store for skip connection
@@ -551,6 +557,7 @@ class EquivariantTransformerBlock(nn.Module):
             edge_feats,
             features,
             mask,
+            bias,
         )
         # Apply the linear projection
         return self.proj(features)
@@ -632,6 +639,7 @@ class EquivariantTransformer(nn.Module):
         self: EquivariantTransformer,
         polymer: GeometricPolymer,
         mask: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
     ) -> GeometricPolymer:
         """
         Apply the forward method to a geometric polymer.
@@ -649,6 +657,7 @@ class EquivariantTransformer(nn.Module):
             polymer.node_features,
             polymer.edge_features,
             mask,
+            bias,
         )
         return polymer
 
@@ -659,6 +668,7 @@ class EquivariantTransformer(nn.Module):
         node_features: torch.Tensor,
         edge_features: torch.Tensor,
         mask: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Apply the equivariant transformer to the input geometric graph.
@@ -684,6 +694,7 @@ class EquivariantTransformer(nn.Module):
                 node_features,
                 edge_features,
                 mask,
+                bias,
             )
         return node_features
 
