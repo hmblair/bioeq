@@ -460,7 +460,7 @@ class EquivariantLayerNorm(nn.Module):
         # The actual layernorm
         self.lnorm = nn.LayerNorm(repr.mult)
         # The nonlinearity applied to the norms
-        self.nonlinearity = nn.ReLU()
+        self.nonlinearity = nn.Softplus()
         # To prevent division by zero
         self.epsilon = epsilon
         # Get the indices to which each norm corresponds
@@ -505,6 +505,7 @@ class EquivariantTransformerBlock(nn.Module):
         nheads: int = 1,
         dropout: float = 0.0,
         attn_dropout: float = 0.0,
+        use_ln: bool = True,
     ) -> None:
 
         super().__init__()
@@ -518,7 +519,9 @@ class EquivariantTransformerBlock(nn.Module):
             attn_dropout,
         )
         # The layernorm
-        self.ln = EquivariantLayerNorm(repr.rep1)
+        self.use_ln = use_ln
+        if self.use_ln:
+            self.ln = EquivariantLayerNorm(repr.rep1)
         # The linear projection for the output
         self.proj = EquivariantLinear(
             repr.rep2,
@@ -539,7 +542,8 @@ class EquivariantTransformerBlock(nn.Module):
         # features_tmp = features
         # Apply the first equivariant layernorm (we use the pre-ln transformer
         # variant)
-        features = self.ln(features)
+        if self.use_ln:
+            features = self.ln(features)
         # Apply the equivariant attention
         features = self.attn(
             graph,
@@ -586,6 +590,7 @@ class EquivariantTransformer(nn.Module):
         reprs = [in_repr] + [hidden_repr] * hidden_layers + [out_repr]
         # Create the layers to move between these representations. Store
         # the product reprs involved
+        use_ln = False
         layers = []
         preprs = []
         for repr1, repr2 in itertools.pairwise(reprs):
@@ -595,8 +600,9 @@ class EquivariantTransformer(nn.Module):
             )
             preprs.append(prepr)
             layers.append(
-                self._construct_layer(prepr)
+                self._construct_layer(prepr, use_ln)
             )
+            use_ln = True
         self.layers = nn.ModuleList(layers)
 
         # Create an equivariant map into the space of appropriately-sized
@@ -606,6 +612,7 @@ class EquivariantTransformer(nn.Module):
     def _construct_layer(
         self: EquivariantTransformer,
         prep: ProductRepr,
+        use_ln: bool,
     ) -> EquivariantTransformerBlock:
         """
         Construct a single layer based on the given product representation.
@@ -618,6 +625,7 @@ class EquivariantTransformer(nn.Module):
             self.nheads,
             self.dropout,
             self.attn_dropout,
+            use_ln,
         )
 
     def polymer(
