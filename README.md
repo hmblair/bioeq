@@ -59,7 +59,7 @@ residue_embedding = nn.Embedding(4, 4)
 
 # Pass through the embeddings and concatenate to get the node features
 elements = elem_embedding(elements.long())
-residues = elem_embedding(residues.long())
+residues = residue_embedding(residues.long())
 node_features = torch.cat([elements, residues], dim=-1)
 ```
 
@@ -85,7 +85,7 @@ geom_polymer = GeometricPolymer(
 )
 ```
 
-Print the geometric polymer;
+Print the geometric polymer:
 ```
 GeometricPolymer:
     num_molecules:    5
