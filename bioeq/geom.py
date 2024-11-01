@@ -595,6 +595,24 @@ class Repr:
             return False
         return True
 
+    def find_scalar(
+        self: Repr,
+    ) -> tuple[int, list]:
+        """
+        Find all degree-zero representations and their locations.
+        """
+
+        nreps = 0
+        locs = []
+        cumdim = 0
+        for repr in self.irreps:
+            if repr.l == 0:
+                nreps += 1
+                locs.append(cumdim)
+            cumdim += repr.dim()
+
+        return nreps, locs
+
     def rot(
         self: Repr,
         axis: torch.Tensor,
@@ -1105,3 +1123,38 @@ class EquivariantBases(nn.Module):
         ]
         # Expand to the required number of outputs without a new calculation
         return tuple(ms[ix] for ix in self.repr_ix)
+
+
+class RadialBasisFunctions(nn.Module):
+    """
+    Compute one or more radial basis functions.
+    """
+
+    def __init__(
+        self: RadialBasisFunctions,
+        num_functions: int,
+    ) -> None:
+
+        super().__init__()
+        # Create the mus and the sigmas
+        self.mu = nn.Parameter(
+            torch.randn(num_functions),
+            requires_grad=True,
+        )
+        self.sigma = nn.Parameter(
+            torch.randn(num_functions),
+            requires_grad=True,
+        )
+
+    def forward(
+        self: RadialBasisFunctions,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Pass each element of x though all the radial basis functions.
+        """
+
+        # Compute the exponent
+        exp = (x[..., None] - self.mu) * self.sigma ** 2
+        # Compute the radial basis function
+        return torch.exp(-exp ** 2) / self.sigma
