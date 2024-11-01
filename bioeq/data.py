@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Iterable
+from typing import Iterable, Generator
 import torch
 from biotite.structure.io import load_structure
 from biotite.structure import (
@@ -18,6 +18,8 @@ ELEMENT_IX = {
     "N": 2,
     "O": 3,
     "P": 4,
+    "Cl": 5,
+    "F": 6,
     "D": 0,
 }
 NUM_ELEMENTS = len(ELEMENT_IX)
@@ -164,7 +166,7 @@ def read_structure(
 
     # Get the elements as integers
     elements = np.array([
-        ELEMENT_IX.get(element, 0)
+        ELEMENT_IX[element]
         for element in struct.element
     ]).astype(np.int64)
     # Get the residues as integers
@@ -391,6 +393,12 @@ class StructureDataset:
         self.edge_ix = torch.from_numpy(
             self.ds[EDGE_IX_KEY].values
         )
+        # Zero out the indices
+        self.residue_ix = self.residue_ix - self.residue_ix[0]
+        self.chain_ix = self.chain_ix - self.chain_ix[0]
+        self.molecule_ix = self.molecule_ix - self.molecule_ix[0]
+        self.edge_ix = self.edge_ix - self.edge_ix[0]
+
         # Drop variables from the dataset
         self.ds = self.ds.drop_vars(dropped_features)
         # Get the sizes of the groups of atoms
