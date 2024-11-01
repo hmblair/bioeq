@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any
+from typing import Any, Generator
 import torch
 import torch.nn as nn
 import torch.utils.data as tdata
@@ -220,7 +220,7 @@ class Polymer:
 
     def to(
         self: Polymer,
-        device: str | torch.device,
+        dest: str | torch.device | torch.dtype,
     ) -> Polymer:
         """
         Move all tensors to the given device.
@@ -229,11 +229,12 @@ class Polymer:
         # Copy so as not to overwrite
         new = copy(self)
         # Move all relevant tensors to the device
-        new.coordinates = self.coordinates.to(device)
-        new.graph = self.graph.to(device)
-        new.residue_ix = self.residue_ix.to(device)
-        new.chain_ix = self.chain_ix.to(device)
-        new.molecule_ix = self.molecule_ix.to(device)
+        new.coordinates = self.coordinates.to(dest)
+        if not isinstance(dest, torch.dtype):
+            new.graph = self.graph.to(dest)
+            new.residue_ix = self.residue_ix.to(dest)
+            new.chain_ix = self.chain_ix.to(dest)
+            new.molecule_ix = self.molecule_ix.to(dest)
         return new
 
     def __repr__(
