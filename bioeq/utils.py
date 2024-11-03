@@ -116,16 +116,22 @@ class ProgressBar:
             ) / (self.curr_step + 1)
             self.pbar.set_description(self.pbar_str())
             wandb.log(
-                {f'{self.name} loss': self.loss}
+                {f'{self.name} loss (step)': self.loss}
             )
 
     def epoch(
         self: ProgressBar,
     ) -> None:
         """
-        Increment the epoch counter and reset the step counter and average loss.
+        Increment the epoch counter and reset the step counter and average
+        loss. Log the average loss.
         """
 
+        # Log the average loss
+        if self.curr_epoch != -1:
+            wandb.log(
+                {f'{self.name} loss (epoch)': self.av_loss}
+            )
         # Create a new progress bar
         self.pbar = tqdm(
             self.data,
