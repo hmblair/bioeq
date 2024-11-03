@@ -507,6 +507,8 @@ class StructureDataset:
         chain_ix = chain_ix - chain_ix[0]
         molecule_ix = self.molecule_ix[atom_slice]
         molecule_ix = molecule_ix - molecule_ix[0]
+        # Reset the edges to begin at zero too
+        edges = edges - edges.min() 
         # Extract the additional feautures the user wants
         user_features = [
             torch.Tensor(data[feature].values)
@@ -524,7 +526,6 @@ class StructureDataset:
             dtype=torch.long,
             device=self.device,
         )
-        edges = edges - atom_slice.start
         user_features = [
             feature.to(self.device)
             for feature in user_features
