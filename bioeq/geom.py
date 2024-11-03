@@ -906,15 +906,13 @@ class SphericalHarmonic(nn.Module):
         # the coordinates
         x = x[:, self.ix]
         # Sphericart only supports float32 and float64
-        half = False
-        if x.dtype == torch.float16:
+        dtype = x.dtype 
+        if dtype not in [torch.float32, torch.float64]:
             x = x.to(torch.float32)
-            half = True
         # Compute and keep only the features for the requested degrees
         sh = self.sh.compute(x)
         # Convert the features back to half precision if necessary
-        if half:
-            sh = sh.half()
+        sh = sh.to(dtype)
         # Remove any nan's that come from input zeros
         sh = torch.nan_to_num(sh, nan=0.0)
         # Return the features in the original shape
