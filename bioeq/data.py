@@ -378,8 +378,8 @@ class StructureDataset:
             molecule_features +
             edge_features
         )
-        # Lazily open the dataset
-        self.ds = xr.open_dataset(file)
+        # Open the dataset
+        self.ds = xr.load_dataset(file)
         # Store the indices of the three atom groups
         self.residue_ix = torch.from_numpy(
             self.ds[RESIDUE_IX_KEY].values
