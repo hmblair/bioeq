@@ -1,8 +1,7 @@
 from __future__ import annotations
-from typing import Iterator
+from typing import Iterator, Iterable
 from torch.optim.lr_scheduler import _LRScheduler
 from torch.optim.optimizer import Optimizer
-from torch.utils.data import DataLoader
 import torch
 from tqdm import tqdm
 import wandb
@@ -67,7 +66,7 @@ class ProgressBar:
 
     def __init__(
         self: ProgressBar,
-        data: DataLoader,
+        data: Iterable,
         name: str,
     ) -> None:
 
@@ -130,7 +129,8 @@ class ProgressBar:
         # Log the average loss
         if self.curr_epoch != -1:
             wandb.log(
-                {f'{self.name} loss (epoch)': self.av_loss}
+                data={f'{self.name} loss (epoch)': self.av_loss},
+                step=self.curr_epoch
             )
         # Create a new progress bar
         self.pbar = tqdm(
