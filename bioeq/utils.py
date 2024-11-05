@@ -132,15 +132,16 @@ class ProgressBar:
                 data={f'{self.name} loss (epoch)': self.av_loss},
                 step=self.curr_epoch
             )
+
+        self.curr_epoch += 1
+        self.curr_step = -1
+        self.av_loss = 0
+
         # Create a new progress bar
         self.pbar = tqdm(
             self.data,
             desc=self.pbar_str()
         )
-
-        self.curr_epoch += 1
-        self.curr_step = -1
-        self.av_loss = 0
 
     def __iter__(
         self: ProgressBar,
