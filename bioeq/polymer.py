@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Generator
+from typing import Any
 import torch
 import torch.nn as nn
 import torch.utils.data as tdata
@@ -10,7 +10,11 @@ from torch_scatter import (
     scatter_max as t_scatter_max,
     scatter_min as t_scatter_min,
 )
-from .data import StructureDataset
+from .data import (
+    StructureDataset,
+    to_cif,
+    ELEM_NAMES
+)
 from copy import copy
 
 NODE_DIM = 0
@@ -38,6 +42,7 @@ class Polymer:
     def __init__(
         self: Polymer,
         coordinates: torch.Tensor,
+        elements: torch.Tensor,
         graph: dgl.DGLGraph,
         residue_ix: torch.Tensor,
         chain_ix: torch.Tensor,
@@ -46,6 +51,7 @@ class Polymer:
 
         # Store all attributes
         self.coordinates = coordinates
+        self.elements = elements
         self.graph = graph
         self.residue_ix = residue_ix
         self.chain_ix = chain_ix
@@ -61,7 +67,6 @@ class Polymer:
         self.molecule_sizes = torch.bincount(
             self.molecule_ix
         )
-
         # Keep track of whether the molecule is centered
         self.is_centered = False
 
@@ -146,6 +151,9 @@ class Polymer:
         mask_U = torch.nonzero(mask).squeeze(1)
         # Find all edges beginning in a masked residue
         edge_mask = (residue_U[:, None] == mask_U[None, :])
+        # It is generally faster to take the logical not at the end,
+        # since the unmaksed residues will outnumber the masked
+        # residues.
         return torch.logical_not(
             edge_mask.any(UV_DIM)
         )
@@ -228,14 +236,45 @@ class Polymer:
 
         # Copy so as not to overwrite
         new = copy(self)
-        # Move all relevant tensors to the device
+        # Move the coordinates to the object
         new.coordinates = self.coordinates.to(dest)
+        # If the object is not a new dtype, then also move all the
+        # indices to the object too
         if not isinstance(dest, torch.dtype):
             new.graph = self.graph.to(dest)
+            new.elements = self.elements.to(dest)
             new.residue_ix = self.residue_ix.to(dest)
             new.chain_ix = self.chain_ix.to(dest)
             new.molecule_ix = self.molecule_ix.to(dest)
         return new
+
+    def element_names(
+        self: Polymer,
+    ) -> list[str]:
+        """
+        Get a list of the names of the element of each atom.
+        """
+
+        return [
+            ELEM_NAMES[ix]
+            for ix in self.elements.tolist()
+        ]
+
+    def save(
+        self: Polymer,
+        file: str,
+    ) -> None:
+        """
+        Save the coordinates into a .cif file.
+        """
+
+        # Save to a cif file
+        to_cif(
+            self.coordinates.numpy(),
+            self.element_names(),
+            self.residue_ix.numpy(),
+            file,
+        )
 
     def __repr__(
         self: Polymer,
@@ -266,6 +305,7 @@ class GeometricPolymer(Polymer):
 
         super().__init__(
             polymer.coordinates,
+            polymer.elements,
             polymer.graph,
             polymer.residue_ix,
             polymer.chain_ix,
@@ -295,7 +335,7 @@ class GeometricPolymer(Polymer):
 
     def to(
         self: GeometricPolymer,
-        device: str | torch.device,
+        dest: str | torch.device | torch.dtype,
     ) -> GeometricPolymer:
         """
         Move all tensors to the given device.
@@ -303,14 +343,18 @@ class GeometricPolymer(Polymer):
 
         # Copy so as not to overwrite
         new = copy(self)
-        # Move all relevant tensors to the device
-        new.coordinates = self.coordinates.to(device)
-        new.graph = self.graph.to(device)
-        new.residue_ix = self.residue_ix.to(device)
-        new.chain_ix = self.chain_ix.to(device)
-        new.molecule_ix = self.molecule_ix.to(device)
-        new.node_features = self.node_features.to(device)
-        new.edge_features = self.edge_features.to(device)
+        # Move the features to the object
+        new.coordinates = self.coordinates.to(dest)
+        new.node_features = self.node_features.to(dest)
+        new.edge_features = self.node_features.to(dest)
+        # If the object is not a new dtype, then also move all the
+        # indices to the object too
+        if not isinstance(dest, torch.dtype):
+            new.graph = self.graph.to(dest)
+            new.elements = self.elements.to(dest)
+            new.residue_ix = self.residue_ix.to(dest)
+            new.chain_ix = self.chain_ix.to(dest)
+            new.molecule_ix = self.molecule_ix.to(dest)
         return new
 
     def __repr__(
@@ -466,6 +510,7 @@ class PolymerDataset(tdata.Dataset):
         # Load the raw data
         (
             coordinates,
+            elements,
             edges,
             residue_ix,
             chain_ix,
@@ -479,6 +524,7 @@ class PolymerDataset(tdata.Dataset):
         # Construct the polymer
         polymer = Polymer(
             coordinates,
+            elements,
             graph,
             residue_ix,
             chain_ix,
