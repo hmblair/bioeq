@@ -7,8 +7,6 @@ import torch.nn as nn
 import dgl
 import wigners as wi
 import sphericart.torch as sc
-from sphecerix import tesseral_wigner_D as wigner_D
-from scipy.spatial.transform import Rotation as scipy_r
 from enum import Enum
 
 
@@ -42,11 +40,7 @@ def get_kabsch_rotation_matrix(
     """
     Get the rotation matrix in SO(n) that best aligns the point cloud x with the
     point cloud y using the Kabsch algorithm. If y is None, then the point cloud
-    x is aligned with the coordinate axes, which is equivalent to ... 
-
-    Both x and y should be tensors of shape (..., N, 3). If weight is not None,
-    then it should be a tensor of shape (..., N) containing the weights for each
-    point in the point cloud.
+    x is aligned with the coordinate axes.
     """
 
     # Calculate the covariance matrix
@@ -236,6 +230,9 @@ class Irrep:
         # Store the degree and the multiplicity
         self.l = l
         self.mult = mult
+        # The datatypes used internally
+        self.real_dtype = torch.float32
+        self.complex_dtype = torch.complex128
 
     def __eq__(
         self: Irrep,
@@ -258,6 +255,16 @@ class Irrep:
 
         return 2 * self.l + 1
 
+    def mvals(
+        self: Irrep,
+    ) -> list[int]:
+        """
+        Return a list of the m quantum numbers associated with this
+        irrep, sorted in decreasing order.
+        """
+
+        return [m for m in range(self.l, -self.l-1, -1)]
+
     def offset(
         self: Irrep,
     ) -> int:
@@ -270,23 +277,61 @@ class Irrep:
             for l in range(0, self.l)
         )
 
-    def rot(
+    def raising(
         self: Irrep,
-        axis: torch.Tensor,
-        angle: float,
     ) -> torch.Tensor:
         """
-        Return the Wigner-D matrix for this irrep with the given
-        axis and angle.
+        Get the raising operator associated with this irrep.
         """
 
-        # Get the scipy rotation object
-        rot = scipy_r.from_rotvec(axis.numpy() * angle)
-        # Compute the corresponding Wigner-D matrix
-        return torch.tensor(
-            wigner_D(self.l, rot),
-            dtype=torch.float32,
+        mvals = torch.tensor(self.mvals())
+        # Initialise an empty array of the correct size
+        raising = torch.zeros(
+            (self.dim(), self.dim())
         )
+        # Fill in the off-diagonal
+        for m in mvals[:-1]:
+            raising[
+                self.l - m, self.l - m + 1
+            ] = self.l*(self.l+1) - m*(m-1)
+        return torch.sqrt(raising).to(self.complex_dtype)
+
+    def lowering(
+        self: Irrep,
+    ) -> torch.Tensor:
+        """
+        Get the lowering operator associated with this irrep.
+        """
+        return self.raising().t().conj()
+
+    def _generators(
+        self: Irrep,
+    ) -> torch.Tensor:
+        """
+        Return the image of the three generators of so(3) under the
+        irrep specified by this object.
+        """
+
+        # Get the raising and lowering operators
+        raising = self.raising()
+        lowering = self.lowering()
+        # Compute the x and y generators
+        genx = (raising + lowering) / 2
+        geny = (raising - lowering) / (2j)
+        # Get the z generator as a diagonal matrix
+        mvals = torch.tensor(
+            self.mvals(),
+            dtype=self.complex_dtype,
+        )
+        genz = torch.diag(mvals)
+        # Stack the results along the first dimension
+        gens = 1j * torch.stack(
+            [genx, geny, genz],
+            dim=0,
+        )
+        # Convert from complex to real representations
+        Q = self.toreal()
+        return (Q.t().conj() @ gens @ Q).real.to(self.real_dtype)
 
     def toreal(
         self: Irrep,
@@ -400,6 +445,35 @@ class ProductIrrep:
         """
         return len(self.reps)
 
+    def _coupling(
+        self: ProductIrrep,
+        l: int,
+    ) -> torch.Tensor:
+        """
+        Return the coupling coefficient for the given degree in the
+        tensor product.
+        """
+
+        # Get the representation of interest
+        rep = self.reps[l - self.lmin]
+        # Get the conversion matrices
+        Q1 = self.rep1.toreal()
+        Q2 = self.rep2.toreal()
+        Q = rep.toreal()
+        # Get the complex coupling coefficient
+        c_coeff = torch.Tensor(
+            wi.clebsch_gordan_array(
+                rep.l,
+                self.rep1.l,
+                self.rep2.l,
+            )
+        ).to(torch.complex128)
+        # Convert to the real coupling coefficient
+        return torch.einsum(
+            'ij,kl,mn,ikm->jln',
+            Q, Q1, torch.conj(Q2), c_coeff
+        ).real
+
     def coupling(
         self: ProductIrrep,
     ) -> torch.Tensor:
@@ -417,30 +491,11 @@ class ProductIrrep:
             self.rep2.dim(),
         )
 
-        # Get two of the conversion matrices
-        Q1 = self.rep1.toreal()
-        Q2 = self.rep2.toreal()
-
         repnum = 0
         for rep, cdim in zip(self.reps, self.cumdims()):
 
-            # Get the complex coupling coefficient
-            c_coeff = torch.Tensor(
-                wi.clebsch_gordan_array(
-                    rep.l,
-                    self.rep1.l,
-                    self.rep2.l,
-                )
-            ).to(torch.complex128)
-            # Renormalize the coefficient
-            c_coeff /= rep.dim()
-            # Get the third conversion matrix
-            Q = rep.toreal()
-            # Convert to the real coefficient
-            coeff[cdim:cdim+rep.dim(), :, repnum, :] = torch.einsum(
-                'ij,kl,mn,ikm->jln',
-                Q, Q1, torch.conj(Q2), c_coeff
-            ).real
+            # Compute the real coupling coefficient
+            coeff[cdim:cdim+rep.dim(), :, repnum, :] = self._coupling(rep.l)
             # Advance the rep number
             repnum += 1
 
@@ -456,7 +511,6 @@ class ProductIrrep:
         """
 
         # In the low-rank coupling, the coupling only occurs
-        # if rep1 == rep2
         if self.rep1.l == self.rep2.l:
             return torch.eye(self.rep1.dim())
         else:
@@ -474,7 +528,7 @@ class ProductIrrep:
         return f"A tensor product of irreps of degrees {self.rep1.l} and {self.rep2.l}."
 
 
-class Repr:
+class Repr(nn.Module):
     """
     Collect together a group of irreducible representations into
     a single representation.
@@ -486,6 +540,7 @@ class Repr:
         mult: int = 1,
     ) -> None:
 
+        super().__init__()
         self.irreps = [
             Irrep(l, mult)
             for l in lvals
@@ -495,6 +550,12 @@ class Repr:
             for irrep in self.irreps
         ]
         self.mult = mult
+        # Pre-compute the so(3) generators and reshape for downstream
+        # multiplications
+        self.register_buffer(
+            'generators',
+            self._generators().view(3, -1)
+        )
 
     def nreps(
         self: Repr,
@@ -511,18 +572,6 @@ class Repr:
         Iterate over the irreducible representations.
         """
         yield from self.irreps
-
-    def __eq__(
-        self: Repr,
-        other: Any,
-    ) -> bool:
-        """
-        Check if the representations have the same degrees. The multiplicity
-        is not checked.
-        """
-        if not isinstance(other, Repr):
-            return False
-        return self.irreps == other.irreps
 
     def dim(
         self: Repr,
@@ -613,28 +662,49 @@ class Repr:
 
         return nreps, locs
 
+    def _generators(
+        self: Repr,
+    ) -> torch.Tensor:
+        """
+        Return the image of the three generators of so(3) under the
+        irrep specified by this object.
+        """
+
+        # Initialise an appropriate array
+        NUM_GENS = 3
+        gens = torch.zeros(
+            NUM_GENS, self.dim(), self.dim(),
+        )
+        # Fill in using the generators of each irrep
+        cumdim = 0
+        for irrep in self.irreps:
+            gens[
+                ...,
+                cumdim: cumdim + irrep.dim(),
+                cumdim: cumdim + irrep.dim(),
+            ] = irrep._generators()
+            cumdim += irrep.dim()
+        return gens
+
     def rot(
         self: Repr,
         axis: torch.Tensor,
-        angle: float,
+        angle: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Return the Wigner-D matrix for this representation with the given
+        Return the Wigner-D matrix for this irrep with the given
         axis and angle.
         """
 
-        # Initialse an empty array
-        rot = torch.zeros(
-            self.dim(),
-            self.dim(),
+        # Weight the generators of so(3) by the axis values
+        *b, _ = axis.size()
+        gens = (axis @ self.generators).view(
+            *b, self.dim(), self.dim(),
         )
-        # Fill in using the rotations of all irreps
-        for irrep, cdim in zip(self, self.cumdims()):
-            rot[
-                cdim: cdim + irrep.dim(),
-                cdim: cdim + irrep.dim(),
-            ] = irrep.rot(axis, angle)
-        return rot
+        # Multiply by the angle and exponentiate to move to SO(3)
+        return torch.linalg.matrix_exp(
+            angle[..., None, None] * gens
+        )
 
     def __str__(
         self: Repr,
@@ -906,12 +976,13 @@ class SphericalHarmonic(nn.Module):
         # the coordinates
         x = x[:, self.ix]
         # Sphericart only supports float32 and float64
-        dtype = x.dtype 
-        if dtype not in [torch.float32, torch.float64]:
+        dtype = x.dtype
+        SPHERICART_DTYPES = [torch.float32, torch.float64]
+        if dtype not in SPHERICART_DTYPES:
             x = x.to(torch.float32)
         # Compute and keep only the features for the requested degrees
         sh = self.sh.compute(x)
-        # Convert the features back to half precision if necessary
+        # Convert the features back to their original precision
         sh = sh.to(dtype)
         # Remove any nan's that come from input zeros
         sh = torch.nan_to_num(sh, nan=0.0)
@@ -1090,7 +1161,10 @@ class EquivariantBases(nn.Module):
         # input features in the convolution step
         return (sh_r @ coupling).view(*b, *outdims)
 
-    def forward(self: EquivariantBases, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def forward(
+        self: EquivariantBases,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
         # Get the spherical harmonic features
         sh = self.sh(x)
         # Matrix multiplication
