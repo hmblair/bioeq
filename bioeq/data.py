@@ -1,8 +1,13 @@
 from __future__ import annotations
-from typing import Iterable, Generator
+from typing import Iterable
 import torch
 from biotite.structure.io import load_structure
+from biotite.structure.io.pdbx import (
+    CIFFile,
+    set_structure,
+)
 from biotite.structure import (
+    AtomArray,
     connect_via_residue_names,
     connect_via_distances,
 )
@@ -13,16 +18,15 @@ from pathlib import Path
 from tqdm import tqdm
 
 ELEMENT_IX = {
-    "H": 0,
-    "C": 1,
-    "N": 2,
-    "O": 3,
-    "P": 4,
+    "H":  0,
+    "C":  1,
+    "N":  2,
+    "O":  3,
+    "P":  4,
     "Cl": 5,
-    "F": 6,
-    "D": 0,
+    "F":  6,
+    "D":  7,
 }
-NUM_ELEMENTS = len(ELEMENT_IX)
 NUCLEOTIDE_RES_IX = {
     "A": 0,
     "C": 1,
@@ -30,7 +34,16 @@ NUCLEOTIDE_RES_IX = {
     "T": 3,
     "U": 3,
 }
+
+NUM_ELEMENTS = len(ELEMENT_IX)
 NUM_NUCLEOTIDE_RES = len(NUCLEOTIDE_RES_IX)
+
+ELEM_NAMES = {
+    ix: name for name, ix in ELEMENT_IX.items()
+}
+CHAIN_NAMES = "ABCDEFGH"
+RNA_NAMES = "ACGU"
+DNA_NAMES = "ACGT"
 
 ATOM_DIM = 'atom'
 RESIDUE_DIM = 'residue'
@@ -41,6 +54,7 @@ COORDINATE_DIM = 'axis'
 SRCDST_DIM = 'loc'
 
 COORDINATES_KEY = 'coordinates'
+ELEMENTS_KEY = 'elements'
 EDGES_KEY = 'edges'
 RESIDUE_IX_KEY = 'residue_ix'
 CHAIN_IX_KEY = 'chain_ix'
@@ -209,6 +223,33 @@ def read_structure(
     )
 
 
+def to_cif(
+    coordinates: np.ndarray,
+    elements: list,
+    residue_ix: np.ndarray,
+    file: str,
+) -> None:
+    """
+    Save a structure to a PDB file.
+    """
+
+    # Create an AtomArray
+    num_atoms = len(coordinates)
+    atom_array = AtomArray(num_atoms)
+    # Assign coordinates
+    atom_array.coord = coordinates
+    # Set element symbols and residue indices
+    atom_array.element = np.array(elements, dtype="U2")
+    atom_array.res_id = np.array(residue_ix)
+
+    # Create a CIFFile and add the AtomArray structure
+    cif_file = CIFFile()
+    set_structure(cif_file, atom_array)
+    # Save the CIF file
+    with open(file, "w") as f:
+        f.write(str(cif_file))
+
+
 def create_structure_dataset(
     directory: str,
     extension: str,
@@ -306,7 +347,7 @@ def create_structure_dataset(
             MOLECULE_IX_KEY: ([ATOM_DIM], molecule_ix),
             EDGE_IX_KEY: ([EDGE_DIM], edge_ix),
             ID_KEY: ([MOLECULE_DIM], ids),
-            'elements': ([ATOM_DIM], elements),
+            ELEMENTS_KEY: ([ATOM_DIM], elements),
             'residues': ([ATOM_DIM], residues),
             'bond_types': ([EDGE_DIM], bond_types),
         }
@@ -492,10 +533,13 @@ class StructureDataset:
         atom_slice = data_slice[ATOM_DIM]
         # Load the relevant data from the dataset
         data = self.ds.isel(data_slice)
-        # Extract the coordinates and edges for constructing the
+        # Extract the coordinates, elements, edges for constructing the
         # polymer
         coordinates = torch.Tensor(
             data[COORDINATES_KEY].values
+        )
+        elements = torch.Tensor(
+            data[ELEMENTS_KEY].values
         )
         edges = torch.Tensor(
             data[EDGES_KEY].values
@@ -508,7 +552,7 @@ class StructureDataset:
         molecule_ix = self.molecule_ix[atom_slice]
         molecule_ix = molecule_ix - molecule_ix[0]
         # Reset the edges to begin at zero too
-        edges = edges - edges.min() 
+        edges = edges - edges.min()
         # Extract the additional feautures the user wants
         user_features = [
             torch.Tensor(data[feature].values)
@@ -522,6 +566,10 @@ class StructureDataset:
             dtype=torch.float32,
             device=self.device,
         )
+        elements = edges.to(
+            dtype=torch.long,
+            device=self.device,
+        )
         edges = edges.to(
             dtype=torch.long,
             device=self.device,
@@ -533,6 +581,7 @@ class StructureDataset:
         # Return, including the relevant indices as well
         return (
             coordinates,
+            elements,
             edges,
             residue_ix.long(),
             chain_ix.long(),
