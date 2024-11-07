@@ -9,6 +9,7 @@ from .geom import (
     EquivariantBases,
 )
 from .polymer import GeometricPolymer
+from .seq import sinusoidal_embedding
 from .kernel import CUDA_AVAILABLE
 if CUDA_AVAILABLE:
     from .kernel._mm import EquivariantMatmulKernel
@@ -31,10 +32,11 @@ class EquivariantLinear(nn.Module):
     """
 
     def __init__(
-            self: EquivariantLinear,
-            repr: Repr,
-            out_repr: Repr,
-            dropout: float = 0.0,
+        self: EquivariantLinear,
+        repr: Repr,
+        out_repr: Repr,
+        dropout: float = 0.0,
+        activation: nn.Module | None = None,
     ) -> None:
 
         super().__init__()
@@ -72,10 +74,24 @@ class EquivariantLinear(nn.Module):
         )
         # Create a dropout object
         self.dropout = nn.Dropout(dropout)
+        # Find out if any dimensions are degree-zero, and allocate that many
+        # tensors as a bias
+        nscalar, scalar_locs = repr.find_scalar()
+
+        self.scalar_locs = scalar_locs
+        if nscalar > 0:
+            self.bias = nn.Parameter(
+                torch.randn(out_repr.mult, nscalar),
+                requires_grad=True,
+            )
+        else:
+            self.bias = None
+        # Store the degree-0 activation
+        self.activation = activation or nn.Identity()
 
     def forward(
-            self: EquivariantLinear,
-            f: torch.Tensor,
+        self: EquivariantLinear,
+        f: torch.Tensor,
     ) -> torch.Tensor:
         """
         Take a spherical tensor and apply a linear layer to each irrep
@@ -93,9 +109,15 @@ class EquivariantLinear(nn.Module):
         # out = torch.einsum('lij,...jk->...lik', self.weight, f)
         # Gather the components corresponding to the same degree
         ix = self.indices.expand(*b, *self.expanddims)
-        return out.gather(
+        out = out.gather(
             dim=GATHER_DIM, index=ix,
         ).squeeze(GATHER_DIM)
+        # Add on a bias if it exists
+        if self.bias is not None:
+            out[..., self.scalar_locs] = self.activation(
+                out[..., self.scalar_locs] + self.bias
+            )
+        return out
 
 
 class EquivariantGating(nn.Module):
@@ -153,6 +175,43 @@ class EquivariantGating(nn.Module):
         norms = self.dropout(norms)
         # Expand and multiply by the norms
         return st * norms[..., self.ix]
+
+
+class EquivariantTransition(nn.Module):
+    """
+    A transformer transition layer made from equivariant linear and gating
+    layers.
+    """
+
+    def __init__(
+        self: EquivariantTransition,
+        repr: Repr,
+        hidden_repr: Repr,
+    ) -> None:
+
+        super().__init__()
+        self.proj1 = EquivariantLinear(
+            repr,
+            hidden_repr,
+        )
+        self.gating = EquivariantGating(
+            hidden_repr,
+        )
+        self.proj2 = EquivariantLinear(
+            hidden_repr, repr
+        )
+
+    def forward(
+        self: EquivariantTransition,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Apply the equivariant transition layer.
+        """
+
+        x = self.proj1(x)
+        x = self.gating(x)
+        return self.proj2(x)
 
 
 class RadialWeight(nn.Module):
@@ -418,6 +477,12 @@ class EquivariantAttention(nn.Module):
             nheads,
             attn_dropout,
         )
+        # Create an output projection
+        self.proj = EquivariantLinear(
+            repr.rep2,
+            repr.rep2,
+            dropout,
+        )
         # Store the output dimensions
         self.outdims = (
             repr.rep2.mult,
@@ -443,7 +508,9 @@ class EquivariantAttention(nn.Module):
         # Graph attention
         attn_out = self.attn(graph, k, q, v, mask, bias)
         # Undo any reshapes performed by the attention layer
-        return attn_out.view(graph.num_nodes(), *self.outdims)
+        attn_out = attn_out.view(graph.num_nodes(), *self.outdims)
+        # Pass through the output projection
+        return self.proj(attn_out)
 
 
 class EquivariantLayerNorm(nn.Module):
@@ -510,7 +577,6 @@ class EquivariantTransformerBlock(nn.Module):
         nheads: int = 1,
         dropout: float = 0.0,
         attn_dropout: float = 0.0,
-        use_ln: bool = True,
     ) -> None:
 
         super().__init__()
@@ -523,16 +589,19 @@ class EquivariantTransformerBlock(nn.Module):
             dropout,
             attn_dropout,
         )
-        # The layernorm
-        self.use_ln = use_ln
-        if self.use_ln:
-            self.ln = EquivariantLayerNorm(repr.rep1)
-        # The linear projection for the output
-        self.proj = EquivariantLinear(
-            repr.rep2,
-            repr.rep2,
-            dropout,
+        # The layernorms
+        self.ln1 = EquivariantLayerNorm(repr.rep1)
+        self.ln2 = EquivariantLayerNorm(repr.rep2)
+        # The transition layer
+        hidden_repr = copy(repr.rep2)
+        hidden_repr.mult = hidden_repr.mult * 4
+        self.transition = EquivariantTransition(
+            repr.rep2, hidden_repr,
         )
+        # Whether to use a skip connection
+        deg_match = repr.rep1.lvals == repr.rep2.lvals
+        mult_match = repr.rep1.mult == repr.rep2.mult
+        self.skip = deg_match and mult_match
 
     def forward(
         self: EquivariantTransformerBlock,
@@ -545,11 +614,11 @@ class EquivariantTransformerBlock(nn.Module):
     ) -> torch.Tensor:
 
         # Store for skip connection
-        # features_tmp = features
+        if self.skip:
+            features_tmp = features
         # Apply the first equivariant layernorm (we use the pre-ln transformer
         # variant)
-        if self.use_ln:
-            features = self.ln(features)
+        features = self.ln1(features)
         # Apply the equivariant attention
         features = self.attn(
             graph,
@@ -559,8 +628,15 @@ class EquivariantTransformerBlock(nn.Module):
             mask,
             bias,
         )
-        # Apply the linear projection
-        return self.proj(features)
+        return features
+        if self.skip:
+            features = features + features_tmp
+            features_tmp = features
+        features = self.ln2(features)
+        features = self.transition(features)
+        if self.skip:
+            features = features + features_tmp
+        return features
 
 
 class EquivariantTransformer(nn.Module):
@@ -593,11 +669,16 @@ class EquivariantTransformer(nn.Module):
         self.out_repr = out_repr
         self.hidden_repr = hidden_repr
 
+        # The output projection
+        out_repr_tmp = copy(out_repr)
+        out_repr_tmp.mult = copy(hidden_repr.mult)
+        self.proj = EquivariantLinear(
+            out_repr_tmp, out_repr,
+        )
         # Get the sequence of reprs the model passes through
-        reprs = [in_repr] + [hidden_repr] * hidden_layers + [out_repr]
+        reprs = [in_repr] + [hidden_repr] * hidden_layers + [out_repr_tmp]
         # Create the layers to move between these representations. Store
         # the product reprs involved
-        use_ln = False
         layers = []
         preprs = []
         for repr1, repr2 in itertools.pairwise(reprs):
@@ -607,9 +688,8 @@ class EquivariantTransformer(nn.Module):
             )
             preprs.append(prepr)
             layers.append(
-                self._construct_layer(prepr, use_ln)
+                self._construct_layer(prepr)
             )
-            use_ln = True
         self.layers = nn.ModuleList(layers)
 
         # Create an equivariant map into the space of appropriately-sized
@@ -619,7 +699,6 @@ class EquivariantTransformer(nn.Module):
     def _construct_layer(
         self: EquivariantTransformer,
         prep: ProductRepr,
-        use_ln: bool,
     ) -> EquivariantTransformerBlock:
         """
         Construct a single layer based on the given product representation.
@@ -632,7 +711,6 @@ class EquivariantTransformer(nn.Module):
             self.nheads,
             self.dropout,
             self.attn_dropout,
-            use_ln,
         )
 
     def polymer(
@@ -696,7 +774,8 @@ class EquivariantTransformer(nn.Module):
                 mask,
                 bias,
             )
-        return node_features
+        # Apply the output projection
+        return self.proj(node_features)
 
 
 class CoordinateUpdate(nn.Module):
