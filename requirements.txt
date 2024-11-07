@@ -1,7 +1,6 @@
 torch
 dgl
 wigners
-sphecerix
 biotite
 torch_scatter
 sphericart[torch]
