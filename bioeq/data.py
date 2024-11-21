@@ -11,7 +11,6 @@ from biotite.structure import (
     connect_via_residue_names,
     connect_via_distances,
 )
-import hydride
 import numpy as np
 import os
 import xarray as xr
@@ -130,6 +129,7 @@ def read_structure(
     Read information from a PDB file.
     """
 
+    import hydride
     # Load the structure into an AtomArray
     struct = load_structure(file)
     # Remove any hydrogens
