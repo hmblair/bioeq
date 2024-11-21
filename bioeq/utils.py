@@ -70,6 +70,8 @@ class ProgressBar:
         name: str,
     ) -> None:
 
+        # Initialise wandb
+        wandb.init()
         # The name of this dataset
         self.name = name
         # The data we iterate over
