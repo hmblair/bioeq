@@ -28,6 +28,62 @@ KERNEL = os.environ.get("BIOEQ_KERNEL", "0") == "1"
 
 
 #
+# Simple geometric utils
+#
+
+def unit_dot_product(
+    coordinates: torch.Tensor
+) -> torch.Tensor:
+    """
+    Take a set of coordinates of shape (n, 3, 3), treating the last as the
+    coordinate dim, and compute the unit dot product between the difference
+    vectors.
+    """
+
+    # Get the difference vectors
+    diff1 = coordinates[:, 0] - coordinates[:, 1]
+    diff2 = coordinates[:, 1] - coordinates[:, 2]
+    # Normalise the differences
+    diff1 = diff1 / torch.linalg.norm(
+        diff1, dim=-1, keepdim=True
+    )
+    diff2 = diff2 / torch.linalg.norm(
+        diff2, dim=-1, keepdim=True
+    )
+    # Compute the dot product
+    return (diff1 * diff2).sum(-1)
+
+
+def torsion_unit_dot_product(
+    coordinates: torch.Tensor
+) -> torch.Tensor:
+    """
+    Take a set of coordinates of shape (n, 4, 3), treating the last as the
+    coordinate dim, and compute the torsion angle associated with the
+    triplet.
+    """
+
+    # Compute bond vectors
+    b1 = coordinates[:, 1] - coordinates[:, 0]
+    b2 = coordinates[:, 2] - coordinates[:, 1]
+    b3 = coordinates[:, 3] - coordinates[:, 2]
+
+    # Normalize b2 to get the unit vector
+    b2_unit = b2 / b2.norm(dim=-1, keepdim=True)
+
+    # Compute the perpendicular vectors to the planes formed by b1, b2 and b2, b3
+    n1 = torch.cross(b1, b2_unit, dim=-1)
+    n2 = torch.cross(b2_unit, b3, dim=-1)
+
+    # Compute the unit vectors of n1 and n2
+    n1_unit = n1 / n1.norm(dim=-1, keepdim=True)
+    n2_unit = n2 / n2.norm(dim=-1, keepdim=True)
+
+    # Compute the torsion angle via dot product
+    return (n1_unit * n2_unit).sum(dim=-1)
+
+
+#
 # Alignment and scoring
 #
 
@@ -66,7 +122,7 @@ def kabsch_align(
     weight: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Align the point clouds in x with the point clouds in y using the 
+    Align the point clouds in x with the point clouds in y using the
     Kabsch algorithm, which finds the rotation matrix that aligns the two point
     clouds, such that the root mean square deviation between the two point
     clouds is minimized. The point clouds are also centered at the origin.
@@ -128,7 +184,7 @@ def tm_score(
     d0: float,
 ) -> torch.Tensor:
     """
-    Compute the TM-score between two aligned point clouds x and y, which should 
+    Compute the TM-score between two aligned point clouds x and y, which should
     be tensors of shape (..., N, 3). The result is a tensor of shape (...,).
     """
 
@@ -173,7 +229,7 @@ def frame_align(
 ) -> torch.Tensor:
     """
     Take a point cloud x in (R^d)^N and corresponding orientations R in SO(d)^N, and
-    align the point cloud at each point to the global frame using the rotation 
+    align the point cloud at each point to the global frame using the rotation
     matrix at that point. The point cloud is also centered at the origin.
     """
 
@@ -263,7 +319,7 @@ class Irrep:
         irrep, sorted in decreasing order.
         """
 
-        return [m for m in range(self.l, -self.l-1, -1)]
+        return [m for m in range(-self.l, self.l + 1)]
 
     def offset(
         self: Irrep,
@@ -284,17 +340,21 @@ class Irrep:
         Get the raising operator associated with this irrep.
         """
 
+        j = self.l
+        m = torch.arange(-j, j)
+        return torch.diag(-torch.sqrt(j * (j + 1) - m * (m + 1)), diagonal=-1)
+
         mvals = torch.tensor(self.mvals())
         # Initialise an empty array of the correct size
         raising = torch.zeros(
             (self.dim(), self.dim())
-        )
+        ).to(self.complex_dtype)
         # Fill in the off-diagonal
         for m in mvals[:-1]:
             raising[
-                self.l - m, self.l - m + 1
-            ] = self.l*(self.l+1) - m*(m-1)
-        return torch.sqrt(raising).to(self.complex_dtype)
+                self.l - m, self.l - m - 1
+            ] = self.l*(self.l+1) - m*(m+1)
+        return torch.sqrt(raising)
 
     def lowering(
         self: Irrep,
@@ -302,6 +362,10 @@ class Irrep:
         """
         Get the lowering operator associated with this irrep.
         """
+
+        j = self.l
+        m = torch.arange(-j + 1, j + 1)
+        return torch.diag(torch.sqrt(j * (j + 1) - m * (m - 1)), diagonal=1)
         return self.raising().t().conj()
 
     def _generators(
@@ -316,22 +380,23 @@ class Irrep:
         raising = self.raising()
         lowering = self.lowering()
         # Compute the x and y generators
-        genx = (raising + lowering) / 2
-        geny = (raising - lowering) / (2j)
+        genx = 0.5 * (raising + lowering)
+        geny = -0.5j * (raising - lowering)
         # Get the z generator as a diagonal matrix
         mvals = torch.tensor(
             self.mvals(),
             dtype=self.complex_dtype,
         )
-        genz = torch.diag(mvals)
+        genz = 1j * torch.diag(mvals)
         # Stack the results along the first dimension
-        gens = 1j * torch.stack(
-            [genx, geny, genz],
+        gens = torch.stack(
+            [genx, genz, geny],
             dim=0,
         )
         # Convert from complex to real representations
         Q = self.toreal()
-        return (Q.t().conj() @ gens @ Q).real.to(self.real_dtype)
+        out = (Q.t().conj() @ gens @ Q)
+        return out.real.to(self.real_dtype)
 
     def toreal(
         self: Irrep,
@@ -556,6 +621,7 @@ class Repr(nn.Module):
             'generators',
             self._generators().view(3, -1)
         )
+        self.perm = self._reorder_generators()
 
     def nreps(
         self: Repr,
@@ -640,9 +706,10 @@ class Repr(nn.Module):
         Check if the given spherical tensor has dimensions matchinig this
         representation.
         """
-        if st.size(-2) != self.mult or st.size(-1) != self.dim():
-            return False
-        return True
+
+        correct_mult = st.size(-2) == self.mult
+        correct_dim = st.size(-1) == self.dim()
+        return correct_mult and correct_dim
 
     def find_scalar(
         self: Repr,
@@ -684,12 +751,45 @@ class Repr(nn.Module):
                 cumdim: cumdim + irrep.dim(),
             ] = irrep._generators()
             cumdim += irrep.dim()
+        # Rearrange so that all rank-1 terms appear first
         return gens
+
+    def _reorder_generators(
+        self: Repr,
+    ) -> torch.Tensor:
+        """
+        Get a permutation matrix which will re-order the rotation
+        generators so that all rank-1 and rank-2 equivariant matrices
+        are contiguous.
+        """
+
+        # Initialise a trivial permutation matrix
+        p = torch.eye(self.dim())
+        perm1 = []
+        perm2 = []
+        ix = 0
+        for irrep in self.irreps:
+            perm1.append(
+                ix + irrep.l
+            )
+            for jx in range(irrep.l):
+                perm2.append(
+                    ix + jx
+                )
+                perm2.append(
+                    ix + irrep.dim() - jx - 1
+                )
+            ix += irrep.dim()
+
+        perm = perm1 + perm2
+
+        return p[perm]
 
     def rot(
         self: Repr,
         axis: torch.Tensor,
         angle: torch.Tensor,
+        perm: bool = False,
     ) -> torch.Tensor:
         """
         Return the Wigner-D matrix for this irrep with the given
@@ -702,9 +802,39 @@ class Repr(nn.Module):
             *b, self.dim(), self.dim(),
         )
         # Multiply by the angle and exponentiate to move to SO(3)
-        return torch.linalg.matrix_exp(
+        rot = torch.linalg.matrix_exp(
             angle[..., None, None] * gens
         )
+        if perm:
+            rot = rot @ self.perm.t()
+        # Zero out any nan values, which come from invalid axes
+        # TODO: we don't zero out the degree-0 features.
+        return torch.nan_to_num(rot, 0.0)
+
+    def basis(
+        self: Repr,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Return the equivariant basis elements associated with the input points.
+        """
+
+        p = torch.tensor(
+            [0, 1, 0],
+            device=x.device,
+            dtype=x.dtype,
+        )
+        # Find the axis to rotate about
+        axis = torch.linalg.cross(x, p[None, :])
+        axis = axis / torch.linalg.norm(
+            axis, dim=-1, keepdim=True,
+        )
+        # Find the angle to rotate by
+        angle = -torch.arccos(
+            x[:, 1] / torch.linalg.norm(x, dim=-1)
+        )
+        # Compute the basis via the Wigner matrices
+        return self.rot(axis, angle)
 
     def __str__(
         self: Repr,
@@ -969,7 +1099,7 @@ class SphericalHarmonic(nn.Module):
         """
 
         # Flatten the batch and point dimensions
-        *b, n, _ = x.shape
+        * b, n, _ = x.shape
         x = x.view(-1, 3)
         # In order for the degree-1 spherical harmonics to be the identity
         # function (and for proper equivariance to hold), we need to permute
@@ -1051,7 +1181,7 @@ class EquivariantBasis(nn.Module):
         # Get the spherical harmonic features
         sh = self.sh(x)
         # Reshape for multiplication
-        *b, maxdim = sh.size()
+        * b, maxdim = sh.size()
         sh_r = sh.view(-1, maxdim)
         # Multiply and reshape for multiplication with the
         # input features
@@ -1070,7 +1200,7 @@ class EquivariantBasis(nn.Module):
         # Get the spherical harmonic features
         sh = self.sh.edgewise(x, graph)
         # Reshape for multiplication
-        *b, maxdim = sh.size()
+        * b, maxdim = sh.size()
         sh_r = sh.view(-1, maxdim)
         # Multiply and reshape for multiplication with the
         # input features in the convolution step
@@ -1155,7 +1285,7 @@ class EquivariantBases(nn.Module):
         """
 
         # Reshape for multiplication
-        *b, maxdim = sh.size()
+        * b, maxdim = sh.size()
         sh_r = sh.view(-1, maxdim)
         # Multiply and reshape for multiplication with the
         # input features in the convolution step
@@ -1165,6 +1295,7 @@ class EquivariantBases(nn.Module):
         self: EquivariantBases,
         x: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
+
         # Get the spherical harmonic features
         sh = self.sh(x)
         # Matrix multiplication
@@ -1229,4 +1360,4 @@ class RadialBasisFunctions(nn.Module):
         # Compute the exponent
         exp = (x[..., None] - self.mu) * self.sigma ** 2
         # Compute the radial basis function
-        return torch.exp(-exp ** 2) / self.sigma
+        return torch.exp(-exp ** 2) * self.sigma
