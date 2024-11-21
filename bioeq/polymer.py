@@ -439,7 +439,8 @@ class Polymer:
 
         if prop in self._nums:
             return torch.arange(
-                self._nums[prop]
+                self._nums[prop],
+                device=self._sizes[prop].device,
             ).repeat_interleave(self._sizes[prop])
         return self._atom_properties[prop]
 
@@ -819,7 +820,7 @@ class Polymer:
         elem_names = Element.revdict()
         return [
             elem_names[ix]
-            for ix in self.elements.tolist()
+            for ix in self.elements.cpu().tolist()
         ]
 
     def sequence(
@@ -854,10 +855,10 @@ class Polymer:
 
         residue_ix = torch.arange(
             self.num_residues
-        ).repeat_interleave(self.residue_sizes)
+        ).repeat_interleave(self.residue_sizes.cpu())
         # Save to a cif file
         to_cif(
-            self.coordinates.detach().numpy(),
+            self.coordinates.detach().cpu().numpy(),
             self.element_names(),
             residue_ix.numpy(),
             file,
