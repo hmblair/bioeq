@@ -192,7 +192,7 @@ class Polymer:
         prop: Property,
     ) -> torch.Tensor:
         """
-        Count the number of indices in each [scale].
+        Count the number of indices associated with each property.
         """
 
         bins = self._bins(prop)
@@ -207,7 +207,8 @@ class Polymer:
         prop: Property,
     ) -> torch.Tensor:
         """
-        Count the number of bonds in each [scale].
+        Count the number of bonds beginning from or terminating in each
+        different property.
         """
 
         return self._hist(
@@ -1001,6 +1002,7 @@ def polymer_kabsch_distance(
     # Weight the coordinates accordingly
     if weight is not None:
         weight = weight / weight.mean()
+        weight = weight[:, None]
         polymer1_c.coordinates = polymer1_c.coordinates * weight
         polymer2_c.coordinates = polymer2_c.coordinates * weight
     # Get the coordinate covariance matrices
