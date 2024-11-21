@@ -51,11 +51,12 @@ The node features we can create by passing each of the elements and residues thr
 ```
 import torch
 import torch.nn as nn
+from bioeq._index import Element, Residue
 
 # Create a separate embedding for the elements and the residues, both of size
 # four
-elem_embedding = nn.Embedding(5, 4)
-residue_embedding = nn.Embedding(4, 4)
+elem_embedding = nn.Embedding(len(Element), 4)
+residue_embedding = nn.Embedding(len(Residue), 4)
 
 # Pass through the embeddings and concatenate to get the node features
 elements = elem_embedding(elements.long())
@@ -146,3 +147,86 @@ GeometricPolymer:
 ```
 
 Note how the node features have changed in degree and multiplicity, but the structure of the molecule has remained the same, as have the edge features.
+
+# Working with Polymers
+
+Atoms in a polymer have five different properties associated with them:
+* their element,
+* their name (e.g. C5'),
+* which residue they belong to,
+* which chain they belong to, and
+* which molecule they belong to.
+
+The `select` method allows us to select atoms based on their properties. The different properties are stored in the `Property` enum. Moreover, the elements and residues are stored in the `Element` and `Residue` enums respectively. For example,
+```
+from bioeq._index import(
+    Property,
+    Element,
+    Residue,
+    Adenosine,
+    Guanosine,
+    Cytidine,
+    Uridine,
+    Reduction,
+)
+
+# Select the first molecule
+ix = torch.tensor([0])
+polymer.select(ix, Property.MOLECULE)
+
+# Select residues 5 through 12
+ix = torch.arange(5, 12)
+polymer.select(ix, Property.RESIDUE)
+
+# Select all hydrogens
+ix = torch.tensor([Element.H.value])
+polymer.select(ix, Property.ELEMENT)
+
+# Select the glycosidic atoms
+ix = torch.tensor([
+    Adenosine.N9.value,
+    Guanosine.N9.value,
+    Cytidine.N1.value,
+    Uridine.N1.value,
+])
+polymer.select(ix, Property.NAME)
+```
+
+The `reduce` method works analogously, but instead of selecting the atoms, it reduces the input features across all atoms sharing the same property. The choice of reduction is stored in the `Reduction` enum.
+
+```
+# Compute the mean position of each residue
+# Note that reduce uses Reduction.MEAN by default
+polymer.reduce(
+    polymer.coordinates,
+    Property.RESIDUE,
+)
+
+# Compute the maximum partial charge among all oxygen atoms
+# Note that MAX and MIN reductions return the argmax or argmin as a second argument
+max_pc, _ polymer.reduce(
+    polymer.partial_charge(),
+    Property.ELEMENT,
+    Reduction.MAX,
+)
+oxygen_max_pc = pc[Element.O.value]
+```
+
+Some other features that may be useful to you are 
+
+```
+# Get the orientation-corrected principal components of all residues in the polymer
+_, Q = polymer.align(Property.RESIDUE)
+
+# Center the polymer
+centered = polymer.center()
+
+# Save the coordinates, elememts, and residues to a .cif file
+polymer.cif('example.cif')
+
+# Get the average bond length of all unique bonds (e.g. C5'-N1) in the molecule
+# by reducing over bond types
+lenghts = polymer.breduce(
+    polymer.pdist()
+)
+```
