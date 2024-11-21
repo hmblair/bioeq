@@ -11,39 +11,31 @@ from biotite.structure import (
     connect_via_residue_names,
     connect_via_distances,
 )
+import hydride
 import numpy as np
 import os
 import xarray as xr
 from pathlib import Path
 from tqdm import tqdm
+from ._index import (
+    Element,
+    Residue,
+    Backbone,
+    RibonucleicAcid,
+    ATOM_PAIR_TO_ENUM,
+)
+from bioeq._cpp._c import _partitionCount
 
-ELEMENT_IX = {
-    "H":  0,
-    "C":  1,
-    "N":  2,
-    "O":  3,
-    "P":  4,
-    "Cl": 5,
-    "F":  6,
-    "D":  7,
-}
-NUCLEOTIDE_RES_IX = {
-    "A": 0,
-    "C": 1,
-    "G": 2,
-    "T": 3,
-    "U": 3,
-}
 
-NUM_ELEMENTS = len(ELEMENT_IX)
-NUM_NUCLEOTIDE_RES = len(NUCLEOTIDE_RES_IX)
+def unprime(
+    arr: np.ndarray,
+) -> np.ndarray:
+    """
+    Convert all primes in the entires to ps.
+    """
 
-ELEM_NAMES = {
-    ix: name for name, ix in ELEMENT_IX.items()
-}
-CHAIN_NAMES = "ABCDEFGH"
-RNA_NAMES = "ACGU"
-DNA_NAMES = "ACGT"
+    return np.char.replace(arr, "'", "p")
+
 
 ATOM_DIM = 'atom'
 RESIDUE_DIM = 'residue'
@@ -56,17 +48,17 @@ SRCDST_DIM = 'loc'
 COORDINATES_KEY = 'coordinates'
 ELEMENTS_KEY = 'elements'
 EDGES_KEY = 'edges'
-RESIDUE_IX_KEY = 'residue_ix'
-CHAIN_IX_KEY = 'chain_ix'
-MOLECULE_IX_KEY = 'molecule_ix'
-EDGE_IX_KEY = 'edge_ix'
+RESIDUE_SIZES_KEY = 'residue_sizes'
+CHAIN_SIZES_KEY = 'chain_sizes'
+MOLECULE_SIZES_KEY = 'molecule_sizes'
+EDGE_SIZES_KEY = 'edge_sizes'
 ID_KEY = 'id'
 
 INDEX_VARS = [
-    RESIDUE_IX_KEY,
-    CHAIN_IX_KEY,
-    MOLECULE_IX_KEY,
-    EDGE_IX_KEY,
+    RESIDUE_SIZES_KEY,
+    CHAIN_SIZES_KEY,
+    MOLECULE_SIZES_KEY,
+    EDGE_SIZES_KEY,
 ]
 
 DIMENSION_VARS = [
@@ -85,6 +77,7 @@ def bullets(
     """
     Convert a list of strings to a bullet point list.
     """
+
     return " " * offset + ("\n" + " " * offset).join(f"- {s}" for s in strings)
 
 
@@ -131,6 +124,7 @@ def read_structure(
     np.ndarray,
     np.ndarray,
     np.ndarray,
+    np.ndarray,
 ]:
     """
     Read information from a PDB file.
@@ -138,88 +132,106 @@ def read_structure(
 
     # Load the structure into an AtomArray
     struct = load_structure(file)
-    # Get the coordinates
-    coordinates = struct.coord
+    # Remove any hydrogens
+    struct = struct[
+        struct.element != 'H'
+    ]
+    # Remove any deuteriums
+    struct = struct[
+        struct.element != 'D'
+    ]
+    # Remove any Ns
+    struct = struct[
+        struct.res_name != 'N'
+    ]
+
     # Get the bonds and their types
     if connect_via == 'residue_names':
-        bonds = connect_via_residue_names(
+        struct.bonds = connect_via_residue_names(
             struct
-        ).as_array()
+        )
     elif connect_via == 'distances':
-        bonds = connect_via_distances(
+        struct.bonds = connect_via_distances(
             struct
-        ).as_array()
+        )
     else:
         raise ValueError(
             "'connect_via' must be either 'residue_names' or"
             " 'distances'."
         )
+    # Add formal charges
+    struct.charge = np.zeros(struct.shape[0])
+    # Add in predicted hydrogens
+    struct, _ = hydride.add_hydrogen(struct)
+    # Get the atom names without primes
+    struct.atom_name = unprime(struct.atom_name)
+    # Add the residue name on to the atom name if it is not on the backbone
+    for i, name in enumerate(struct.atom_name):
+        if name not in Backbone.list():
+            struct.atom_name[i] = struct.res_name[i] + \
+                '_' + struct.atom_name[i]
+    # Get rid of any weird atoms
+    struct = struct[
+        np.isin(struct.atom_name, RibonucleicAcid.list())
+    ]
+    # Get rid of any weird bases
+    struct.res_name = np.char.replace(struct.res_name, "DU", "U")
+    # Get the coordinates
+    coordinates = struct.coord
+    # Get the bonds
+    bonds = struct.bonds.as_array()
     bond_edges = bonds[:, 0:2]
     bond_types = bonds[:, 2]
-    # Add self and reverse edges too
-    self_edges = np.tile(
-        np.arange(coordinates.shape[0])[:, None],
-        (1, 2)
-    )
-    self_bond_types = np.zeros(
-        coordinates.shape[0]
-    )
-    bond_edges = np.concatenate(
-        [bond_edges,
-         bond_edges[:, ::-1],
-         self_edges],
-        axis=0
-    )
-    bond_types = np.concatenate(
-        [bond_types,
-         bond_types,
-         self_bond_types,
-         ],
-        axis=0
-    )
 
+    # Get the atom names as integers
+    atom_names = np.array([
+        RibonucleicAcid[element].value
+        for element in struct.atom_name
+    ]).astype(np.int64)
     # Get the elements as integers
     elements = np.array([
-        ELEMENT_IX[element]
+        Element[element].value
         for element in struct.element
     ]).astype(np.int64)
     # Get the residues as integers
     residues = np.array([
-        NUCLEOTIDE_RES_IX.get(res, -1)
+        Residue[res].value
         for res in struct.res_name
     ]).astype(np.int64)
-    # Get which residue each atom belongs to
-    if all(not res for res in struct.res_id):
-        residue_ix = np.zeros(
-            len(struct.res_id),
-        )
-    else:
-        residue_ix = struct.res_id
-        residue_ix = residue_ix - residue_ix[0]
-        # The residue indices are often screwed up in the PDB file. We
-        # re-index them here.
-        diffs = np.concatenate(
-            (np.array([0]), residue_ix[1:] != residue_ix[:-1])
-        )
-        residue_ix = np.cumsum(diffs)
-    # Get which chain each atom belongs to
-    if all(not res for res in struct.chain_id):
-        chain_ix = np.zeros(
-            len(struct.chain_id),
-        )
-    else:
-        _, chain_ix = np.unique(
-            struct.chain_id,
-            return_inverse=True,
-        )
+
+    # Remove any weird bonds
+    bond_src = atom_names[bond_edges[:, 0]]
+    bond_dst = atom_names[bond_edges[:, 1]]
+    ix = ATOM_PAIR_TO_ENUM[bond_src, bond_dst] != -1
+    bond_edges = bond_edges[ix]
+    bond_types = bond_types[ix]
+
+    # Get the size of each residue
+    residue_sizes = np.bincount(
+        struct.res_id - struct.res_id.min()
+    )
+    residue_sizes = residue_sizes[
+        residue_sizes > 0
+    ]
+    # Get the size of each chain
+    _, chain_ix = np.unique(
+        struct.chain_id,
+        return_inverse=True,
+    )
+    chain_sizes = np.bincount(chain_ix)
+    chain_sizes = chain_sizes[
+        chain_sizes > 0
+    ]
+
     return (
         coordinates,
         bond_edges,
         bond_types,
+        atom_names,
         elements,
         residues,
-        residue_ix,
-        chain_ix,
+        residue_sizes,
+        chain_sizes,
     )
 
 
@@ -228,11 +240,18 @@ def to_cif(
     elements: list,
     residue_ix: np.ndarray,
     file: str,
+    overwrite: bool = False,
 ) -> None:
     """
     Save a structure to a PDB file.
     """
 
+    # Check if the file exists already
+    if os.path.exists(file) and not overwrite:
+        raise OSError(
+            f"The file {file} already exists and overwrite was not"
+            " set."
+        )
     # Create an AtomArray
     num_atoms = len(coordinates)
     atom_array = AtomArray(num_atoms)
@@ -263,18 +282,15 @@ def create_structure_dataset(
     residues_ls = []
     bond_edges_ls = []
     bond_types_ls = []
+    atom_names_ls = []
     elements_ls = []
 
-    residue_ix_ls = []
-    chain_ix_ls = []
-    molecule_ix_ls = []
-    edge_molecule_ix_ls = []
+    residue_sizes_ls = []
+    chain_sizes_ls = []
+    molecule_sizes_ls = []
+    edge_sizes_ls = []
 
-    prev_residue_ix = 0
-    prev_chain_ix = 0
-    prev_molecule_ix = 0
     prev_edge_ix = 0
-    prev_edge_molecule_ix = 0
 
     for file in tqdm(
         os.listdir(directory),
@@ -291,10 +307,11 @@ def create_structure_dataset(
         (coordinates,
          bond_edges,
          bond_types,
+         atom_names,
          elements,
          residues,
-         residue_ix,
-         chain_ix) = read_structure(
+         residue_sizes,
+         chain_sizes) = read_structure(
             os.path.join(directory, file),
             connect_via,
         )
@@ -302,52 +319,49 @@ def create_structure_dataset(
         coordinates_ls.append(coordinates)
         residues_ls.append(residues)
         elements_ls.append(elements)
+        atom_names_ls.append(atom_names)
         bond_edges_ls.append(
             bond_edges + prev_edge_ix
         )
         prev_edge_ix += coordinates.shape[0]
         bond_types_ls.append(bond_types)
 
-        residue_ix_ls.append(
-            residue_ix + prev_residue_ix
+        residue_sizes_ls.append(
+            residue_sizes
         )
-        prev_residue_ix = residue_ix_ls[-1][-1] + 1
-        chain_ix_ls.append(
-            chain_ix + prev_chain_ix
+        chain_sizes_ls.append(
+            chain_sizes
         )
-        prev_chain_ix = chain_ix_ls[-1][-1] + 1
-
-        molecule_ix_ls.append(
-            np.ones(coordinates.shape[0]) * prev_molecule_ix
+        molecule_sizes_ls.append(
+            coordinates.shape[0]
         )
-        prev_molecule_ix += 1
-
-        edge_molecule_ix_ls.append(
-            np.ones(bond_edges.shape[0]) * prev_edge_molecule_ix
+        edge_sizes_ls.append(
+            bond_edges.shape[0]
         )
-        prev_edge_molecule_ix += 1
 
     coordinates = np.concatenate(coordinates_ls)
     residues = np.concatenate(residues_ls).astype(np.int64)
     elements = np.concatenate(elements_ls).astype(np.int64)
+    atom_names = np.concatenate(atom_names_ls).astype(np.int64)
 
     bond_edges = np.concatenate(bond_edges_ls).astype(np.int64)
     bond_types = np.concatenate(bond_types_ls).astype(np.int64)
-    residue_ix = np.concatenate(residue_ix_ls).astype(np.int64)
-    chain_ix = np.concatenate(chain_ix_ls).astype(np.int64)
-    molecule_ix = np.concatenate(molecule_ix_ls).astype(np.int64)
-    edge_ix = np.concatenate(edge_molecule_ix_ls).astype(np.int64)
+    residue_sizes = np.concatenate(residue_sizes_ls).astype(np.int64)
+    chain_sizes = np.concatenate(chain_sizes_ls).astype(np.int64)
+    molecule_sizes = np.array(molecule_sizes_ls).astype(np.int64)
+    edge_sizes = np.array(edge_sizes_ls).astype(np.int64)
 
     ds = xr.Dataset(
         {
             COORDINATES_KEY: ([ATOM_DIM, COORDINATE_DIM], coordinates),
             EDGES_KEY: ([EDGE_DIM, SRCDST_DIM], bond_edges),
-            RESIDUE_IX_KEY: ([ATOM_DIM], residue_ix),
-            CHAIN_IX_KEY: ([ATOM_DIM], chain_ix),
-            MOLECULE_IX_KEY: ([ATOM_DIM], molecule_ix),
-            EDGE_IX_KEY: ([EDGE_DIM], edge_ix),
+            RESIDUE_SIZES_KEY: ([RESIDUE_DIM], residue_sizes),
+            CHAIN_SIZES_KEY: ([CHAIN_DIM], chain_sizes),
+            MOLECULE_SIZES_KEY: ([MOLECULE_DIM], molecule_sizes),
+            EDGE_SIZES_KEY: ([MOLECULE_DIM], edge_sizes),
             ID_KEY: ([MOLECULE_DIM], ids),
             ELEMENTS_KEY: ([ATOM_DIM], elements),
+            'atom_names': ([ATOM_DIM], atom_names),
             'residues': ([ATOM_DIM], residues),
             'bond_types': ([EDGE_DIM], bond_types),
         }
@@ -420,68 +434,35 @@ class StructureDataset:
             edge_features
         )
         # Open the dataset
-        self.ds = xr.load_dataset(file)
-        # Store the indices of the three atom groups
-        self.residue_ix = torch.from_numpy(
-            self.ds[RESIDUE_IX_KEY].values
-        )
-        self.chain_ix = torch.from_numpy(
-            self.ds[CHAIN_IX_KEY].values
-        )
-        self.molecule_ix = torch.from_numpy(
-            self.ds[MOLECULE_IX_KEY].values
-        )
-        self.edge_ix = torch.from_numpy(
-            self.ds[EDGE_IX_KEY].values
-        )
-        # Zero out the indices
-        self.residue_ix = self.residue_ix - self.residue_ix[0]
-        self.chain_ix = self.chain_ix - self.chain_ix[0]
-        self.molecule_ix = self.molecule_ix - self.molecule_ix[0]
-        self.edge_ix = self.edge_ix - self.edge_ix[0]
+        self.ds = xr.open_dataset(file)
+        # Store the size of the residues, chains, and molecules
+        self.residue_sizes = torch.from_numpy(
+            self.ds[RESIDUE_SIZES_KEY].values
+        ).long()
+        self.chain_sizes = torch.from_numpy(
+            self.ds[CHAIN_SIZES_KEY].values
+        ).long()
+        self.molecule_sizes = torch.from_numpy(
+            self.ds[MOLECULE_SIZES_KEY].values
+        ).long()
+        # Store the number of edges per molecule
+        self.edges_per_molecule = torch.from_numpy(
+            self.ds[EDGE_SIZES_KEY].values
+        ).long()
 
         # Drop variables from the dataset
         self.ds = self.ds.drop_vars(dropped_features)
-        # Get the sizes of the groups of atoms
-        self.residue_sizes = torch.bincount(
-            self.residue_ix
-        )
-        self.chain_sizes = torch.bincount(
-            self.chain_ix
-        )
-        self.atoms_per_molecule = torch.bincount(
-            self.molecule_ix
-        )
-        self.edges_per_molecule = torch.bincount(
-            self.edge_ix
-        )
-
         # Get the number of residues and chains per molecule
-        molecule_indices = torch.arange(self.molecule_ix.max().item() + 1)
-        # Create a 2D tensor of (molecule, residue) pairs
-        molecule_residue_pairs = torch.stack(
-            [self.molecule_ix, self.residue_ix], dim=1)
-        # Find unique pairs, then count unique residues per molecule
-        unique_pairs = torch.unique(molecule_residue_pairs, dim=0)
-        # Count residues per molecule by binning unique molecule indices
-        self.residues_per_molecule = torch.bincount(
-            unique_pairs[:, 0],
-            minlength=molecule_indices.numel(),
+        self.residues_per_molecule = _partitionCount(
+            self.residue_sizes, self.molecule_sizes,
         )
-        # Create a 2D tensor of (molecule, chain) pairs
-        molecule_chain_pairs = torch.stack(
-            [self.molecule_ix, self.chain_ix], dim=1)
-        # Find unique pairs, then count unique chains per molecule
-        unique_pairs = torch.unique(molecule_chain_pairs, dim=0)
-        # Count residues per molecule by binning unique molecule indices
-        self.chains_per_molecule = torch.bincount(
-            unique_pairs[:, 0],
-            minlength=molecule_indices.numel(),
+        self.chains_per_molecule = _partitionCount(
+            self.chain_sizes, self.molecule_sizes,
         )
 
         # Get the starting position of each atom group in the dataset
         self.atom_starts = padded_cumsum(
-            self.atoms_per_molecule
+            self.molecule_sizes
         )
         self.residue_starts = padded_cumsum(
             self.residues_per_molecule
@@ -504,6 +485,12 @@ class StructureDataset:
             self.slicer.arrays[CHAIN_DIM] = self.chain_starts
         if MOLECULE_DIM in self.ds.dims:
             self.slicer.arrays[MOLECULE_DIM] = self.molecule_starts
+
+        self.slicer2 = Slicer({
+            RESIDUE_DIM: self.residue_starts,
+            CHAIN_DIM: self.chain_starts,
+            MOLECULE_DIM: self.molecule_starts,
+        })
 
     def __getitem__(
         self: StructureDataset,
@@ -530,27 +517,34 @@ class StructureDataset:
 
         # Get the slice of data we want to load
         data_slice = self.slicer(start, stop)
-        atom_slice = data_slice[ATOM_DIM]
+        data_slice2 = self.slicer2(start, stop)
+
+        residue_slice = data_slice2[RESIDUE_DIM]
+        chain_slice = data_slice2[CHAIN_DIM]
+        molecule_slice = data_slice2[MOLECULE_DIM]
         # Load the relevant data from the dataset
         data = self.ds.isel(data_slice)
-        # Extract the coordinates, elements, edges for constructing the
-        # polymer
+        # Extract the coordinates, elements, atom_names, and edges for
+        # constructing the polymer
         coordinates = torch.Tensor(
             data[COORDINATES_KEY].values
         )
         elements = torch.Tensor(
             data[ELEMENTS_KEY].values
         )
+        residues = torch.Tensor(
+            data['residues'].values
+        )
+        atom_names = torch.Tensor(
+            data['atom_names'].values
+        )
         edges = torch.Tensor(
             data[EDGES_KEY].values
         )
-        # Get the relevant indices, and reset them to begin at zero
-        residue_ix = self.residue_ix[atom_slice]
-        residue_ix = residue_ix - residue_ix[0]
-        chain_ix = self.chain_ix[atom_slice]
-        chain_ix = chain_ix - chain_ix[0]
-        molecule_ix = self.molecule_ix[atom_slice]
-        molecule_ix = molecule_ix - molecule_ix[0]
+        # Get the sizes of the relevant objects
+        residue_sizes = self.residue_sizes[residue_slice]
+        chain_sizes = self.chain_sizes[chain_slice]
+        molecule_sizes = self.molecule_sizes[molecule_slice]
         # Reset the edges to begin at zero too
         edges = edges - edges.min()
         # Extract the additional feautures the user wants
@@ -559,14 +553,22 @@ class StructureDataset:
             for feature in self.user_features
         ]
         # Move to the correct datatype and device
-        residue_ix = residue_ix.to(self.device)
-        chain_ix = chain_ix.to(self.device)
-        molecule_ix = molecule_ix.to(self.device)
+        residue_sizes = residue_sizes.to(self.device)
+        chain_sizes = chain_sizes.to(self.device)
+        molecule_sizes = molecule_sizes.to(self.device)
         coordinates = coordinates.to(
             dtype=torch.float32,
             device=self.device,
         )
-        elements = edges.to(
+        elements = elements.to(
+            dtype=torch.long,
+            device=self.device,
+        )
+        residues = residues.to(
+            dtype=torch.long,
+            device=self.device,
+        )
+        atom_names = atom_names.to(
             dtype=torch.long,
             device=self.device,
         )
@@ -582,10 +584,12 @@ class StructureDataset:
         return (
             coordinates,
             elements,
+            residues,
+            atom_names,
             edges,
-            residue_ix.long(),
-            chain_ix.long(),
-            molecule_ix.long(),
+            residue_sizes,
+            chain_sizes,
+            molecule_sizes,
             *user_features,
         )
 
@@ -596,7 +600,7 @@ class StructureDataset:
         The number of atoms in the dataset.
         """
 
-        return self.atoms_per_molecule.sum().item()
+        return self.molecule_sizes.sum().item()
 
     def num_residues(
         self: StructureDataset,
@@ -623,7 +627,7 @@ class StructureDataset:
         The number of molecules in the dataset.
         """
 
-        return len(self.atoms_per_molecule)
+        return len(self.molecule_sizes)
 
     def __len__(
         self: StructureDataset,
@@ -638,7 +642,7 @@ class StructureDataset:
         self: StructureDataset,
         props: list[float],
         filenames: list[str],
-    ) -> list[xr.Dataset]:
+    ) -> None:
         """
         Split the underlying dataset into len(props) datasets containing
         the respective portion of the data.
