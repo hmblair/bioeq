@@ -5,7 +5,6 @@ from .geom import (
     ProductRepr,
     RepNorm,
     FEATURE_DIM,
-    REPR_DIM,
     EquivariantBases,
 )
 from .polymer import GeometricPolymer
@@ -715,7 +714,7 @@ class EquivariantTransformer(nn.Module):
 
     def polymer(
         self: EquivariantTransformer,
-        polymer: GeometricPolymer,
+        geom_polymer: GeometricPolymer,
         mask: torch.Tensor | None = None,
         bias: torch.Tensor | None = None,
     ) -> GeometricPolymer:
@@ -725,19 +724,17 @@ class EquivariantTransformer(nn.Module):
 
         # Center the coordinates as is necessary for translational
         # invariance
-        polymer.center()
-        # Copy the polymer so as not to overwrite the input
-        polymer = copy(polymer)
+        geom_polymer = geom_polymer.center()
         # Update the node features
-        polymer.node_features = self(
-            polymer.graph,
-            polymer.coordinates,
-            polymer.node_features,
-            polymer.edge_features,
+        geom_polymer.node_features = self(
+            geom_polymer.graph,
+            geom_polymer.coordinates,
+            geom_polymer.node_features,
+            geom_polymer.edge_features,
             mask,
             bias,
         )
-        return polymer
+        return geom_polymer
 
     def forward(
         self: EquivariantTransformer,
@@ -776,54 +773,3 @@ class EquivariantTransformer(nn.Module):
             )
         # Apply the output projection
         return self.proj(node_features)
-
-
-class CoordinateUpdate(nn.Module):
-    """
-    A helper class to construct a set of coordinates from a set of node
-    features using an equivariant transformer block.
-    """
-
-    def __init__(
-        self: CoordinateUpdate,
-        repr: Repr,
-        edge_dim: int,
-        edge_hidden_dim: int,
-        nheads: int = 1,
-        dropout: float = 0.0,
-        attn_dropout: float = 0.0,
-    ) -> None:
-
-        # Get a single degree-one representation to output coordinates
-        out_repr = Repr([1])
-        # Construct a product repr
-        prep = ProductRepr(repr, out_repr)
-        # Construct the equivariant transformer
-        self.tf = EquivariantTransformerBlock(
-            prep,
-            edge_dim,
-            edge_hidden_dim,
-            nheads,
-            dropout,
-            attn_dropout,
-        )
-
-    def forward(
-        self: CoordinateUpdate,
-        polymer: GeometricPolymer,
-    ) -> torch.Tensor:
-        """
-        Get a set of coordinates from a GeometricPolymer.
-        """
-
-        # Copy the polymer
-        polymer = copy(polymer)
-        # Update the node features
-        coordinates = self.tf(
-            polymer.graph,
-            polymer.coordinates,
-            polymer.node_features,
-            polymer.edge_features,
-        )
-        # Squeeze the feature dimension
-        return coordinates.squeeze(FEATURE_DIM)
