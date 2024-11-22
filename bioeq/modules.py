@@ -576,6 +576,7 @@ class EquivariantTransformerBlock(nn.Module):
         nheads: int = 1,
         dropout: float = 0.0,
         attn_dropout: float = 0.0,
+        transition: bool = False,
     ) -> None:
 
         super().__init__()
@@ -588,19 +589,23 @@ class EquivariantTransformerBlock(nn.Module):
             dropout,
             attn_dropout,
         )
-        # The layernorms
+        # The first layernorm
         self.ln1 = EquivariantLayerNorm(repr.rep1)
-        self.ln2 = EquivariantLayerNorm(repr.rep2)
-        # The transition layer
-        hidden_repr = copy(repr.rep2)
-        hidden_repr.mult = hidden_repr.mult * 4
-        self.transition = EquivariantTransition(
-            repr.rep2, hidden_repr,
-        )
         # Whether to use a skip connection
         deg_match = repr.rep1.lvals == repr.rep2.lvals
         mult_match = repr.rep1.mult == repr.rep2.mult
         self.skip = deg_match and mult_match
+        # Whether to apply the transition layer
+        self.transition = transition
+        if self.transition:
+            # The second layernorm
+            self.ln2 = EquivariantLayerNorm(repr.rep2)
+            # The transition layer
+            hidden_repr = copy(repr.rep2)
+            hidden_repr.mult = hidden_repr.mult * 4
+            self.transition = EquivariantTransition(
+                repr.rep2, hidden_repr,
+            )
 
     def forward(
         self: EquivariantTransformerBlock,
@@ -627,14 +632,14 @@ class EquivariantTransformerBlock(nn.Module):
             mask,
             bias,
         )
-        return features
-        if self.skip:
-            features = features + features_tmp
-            features_tmp = features
-        features = self.ln2(features)
-        features = self.transition(features)
-        if self.skip:
-            features = features + features_tmp
+        if self.transition:
+            if self.skip:
+                features = features + features_tmp
+                features_tmp = features
+            features = self.ln2(features)
+            features = self.transition(features)
+            if self.skip:
+                features = features + features_tmp
         return features
 
 
@@ -654,6 +659,7 @@ class EquivariantTransformer(nn.Module):
         nheads: int = 1,
         dropout: float = 0.0,
         attn_dropout: float = 0.0,
+        transition: bool = False,
     ) -> None:
 
         super().__init__()
@@ -663,6 +669,7 @@ class EquivariantTransformer(nn.Module):
         self.nheads = nheads
         self.dropout = dropout
         self.attn_dropout = attn_dropout
+        self.transition = transition
         # Store the representations
         self.in_repr = in_repr
         self.out_repr = out_repr
@@ -710,6 +717,7 @@ class EquivariantTransformer(nn.Module):
             self.nheads,
             self.dropout,
             self.attn_dropout,
+            self.transition,
         )
 
     def polymer(
