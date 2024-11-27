@@ -1,9 +1,10 @@
 from __future__ import annotations
 import torch
+import torch.nn as nn
 
 
 def sinusoidal_embedding(
-    batch_shape: torch.Size | tuple[int, ...],
+    batch_shape: torch.Size,
     seq_len: int,
     embedding_dim: int,
     device: str | torch.device,
@@ -40,3 +41,47 @@ def sinusoidal_embedding(
     sinusoidal_embedding[..., 1::2] = torch.cos(angles[..., 1::2])
 
     return sinusoidal_embedding
+
+
+class FixedSinusoidalEmbedding(nn.Module):
+    """
+    Implements a sinusoidal positional embedding with a fixed maximum input
+    index. The forward method returns the value of the positional encoding
+    at the specified indices.
+    """
+
+    def __init__(
+        self: FixedSinusoidalEmbedding,
+        max_index: int,
+        embedding_dim: int,
+    ) -> None:
+
+        super().__init__()
+        # Store the maximum index and the embedding dimension
+        self.max_index = max_index
+        self.embedding_dim = embedding_dim
+        # Create the positional encoding
+        encoding = sinusoidal_embedding(
+            batch_shape=(),
+            seq_len=max_index,
+            embedding_dim=embedding_dim,
+            device='cpu',
+        )
+        # Register the positional encoding with the module
+        self.encoding: torch.Tensor
+        self.register_buffer('encoding', encoding)
+
+    def forward(
+        self: FixedSinusoidalEmbedding,
+        ix: torch.Tensor,
+        shape: torch.Size = torch.Size([]),
+    ) -> torch.Tensor:
+        """
+        Return the positional encoding at the specified index.
+        """
+
+        return self.encoding[ix].expand(
+            *ix.size(),
+            *shape,
+            self.embedding_dim,
+        )
