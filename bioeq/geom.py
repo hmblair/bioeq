@@ -1023,8 +1023,8 @@ class EquivariantBasis(nn.Module):
         # Set the features corresponding to the same point to zero
         sh = torch.nan_to_num(sh, nan=0.0)
 
-        coeff1 = torch.zeros(x.size(0), *self.outdims1)
-        coeff2 = torch.zeros(x.size(0), *self.outdims2)
+        coeff1 = torch.zeros(x.size(0), *self.outdims1, device=x.device)
+        coeff2 = torch.zeros(x.size(0), *self.outdims2, device=x.device)
         for j in range(self.repr.rep1.nreps()):
             low = j ** 2
             high = (j + 1) ** 2
