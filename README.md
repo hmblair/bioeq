@@ -226,7 +226,7 @@ polymer.cif('example.cif')
 
 # Get the average bond length of all unique bonds (e.g. C5'-N1) in the molecule
 # by reducing over bond types
-lenghts = polymer.breduce(
+lengths = polymer.breduce(
     polymer.pdist()
 )
 ```

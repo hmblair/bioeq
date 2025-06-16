@@ -4,26 +4,32 @@ from torch.utils.cpp_extension import (
     CppExtension,
     include_paths,
 )
+from platform import system
 
 NAME = 'bioeq'
 VERSION = '0.1.0'
 LICENSE = 'CC BY-NC 4.0'
 FILES = [
-    'bioeq/_cpp/mol.cpp',
-    'bioeq/_cpp/bind.cpp',
+    'bioeq/src/mol.cpp',
+    'bioeq/src/bind.cpp',
 ]
 
-EXT_NAME = 'bioeq._cpp._c'
+EXT_NAME = 'bioeq.src._cpp'
 ext_modules = []
+extra_compile_args = [
+    "-O3",
+    "-std=c++20",
+]
+if system() == 'Darwin':
+    extra_compile_args += [
+        "-stdlib=libc++",
+        "-fopenmp=libomp"
+    ]
 CPP_EXT = CppExtension(
     EXT_NAME,
     FILES,
     include_dirs=include_paths(),
-    extra_compile_args=[
-        "-O3",
-        "-stdlib=libc++",
-        "-std=c++20",
-    ]
+    extra_compile_args=extra_compile_args,
 )
 ext_modules.append(CPP_EXT)
 

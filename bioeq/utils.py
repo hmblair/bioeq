@@ -68,10 +68,13 @@ class ProgressBar:
         self: ProgressBar,
         data: Iterable,
         name: str,
+        use_wandb: bool = False,
     ) -> None:
 
         # Initialise wandb
-        wandb.init()
+        self.use_wandb = use_wandb
+        if self.use_wandb:
+            wandb.init()
         # The name of this dataset
         self.name = name
         # The data we iterate over
@@ -92,7 +95,7 @@ class ProgressBar:
         The progress bar description.
         """
 
-        return f'Epoch {self.curr_epoch}; loss {self.loss:.2E}; average_loss {self.av_loss:.2E}'
+        return f'Epoch {self.curr_epoch}; {self.name} loss {self.loss:.2E}; average_loss {self.av_loss:.2E}'
 
     def update(
         self: ProgressBar,
@@ -116,9 +119,10 @@ class ProgressBar:
                 self.curr_step * self.av_loss + self.loss
             ) / (self.curr_step + 1)
             self.pbar.set_description(self.pbar_str())
-            wandb.log(
-                {f'{self.name} loss (step)': self.loss}
-            )
+            if self.use_wandb:
+                wandb.log(
+                    {f'{self.name} loss (step)': self.loss}
+                )
 
     def epoch(
         self: ProgressBar,
@@ -129,7 +133,7 @@ class ProgressBar:
         """
 
         # Log the average loss
-        if self.curr_epoch != -1:
+        if self.curr_epoch != -1 and self.use_wandb:
             wandb.log(
                 data={f'{self.name} loss (epoch)': self.av_loss},
                 step=self.curr_epoch

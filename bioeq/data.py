@@ -23,7 +23,7 @@ from ._index import (
     RibonucleicAcid,
     ATOM_PAIR_TO_ENUM,
 )
-from bioeq._cpp._c import _partitionCount
+from bioeq._cpp import _partitionCount
 
 
 def unprime(
@@ -115,16 +115,8 @@ def proportional_slices(
 def read_structure(
     file: str,
     connect_via: str = 'residue_names',
-) -> tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-]:
+    add_hydrogen: bool = True,
+) -> tuple[np.ndarray, ...] | None:
     """
     Read information from a PDB file.
     """
@@ -132,6 +124,8 @@ def read_structure(
     import hydride
     # Load the structure into an AtomArray
     struct = load_structure(file)
+    if (len(struct.shape) > 1):
+        struct = struct[0]
     # Remove any hydrogens
     struct = struct[
         struct.element != 'H'
@@ -144,6 +138,13 @@ def read_structure(
     struct = struct[
         struct.res_name != 'N'
     ]
+    # Remove any weird phosphorus stuff
+    struct = struct[
+        struct.atom_name != 'OP3'
+    ]
+
+    if struct.shape[0] == 0:
+        return None
 
     # Get the bonds and their types
     if connect_via == 'residue_names':
@@ -162,7 +163,8 @@ def read_structure(
     # Add formal charges
     struct.charge = np.zeros(struct.shape[0])
     # Add in predicted hydrogens
-    struct, _ = hydride.add_hydrogen(struct)
+    if add_hydrogen:
+        struct, _ = hydride.add_hydrogen(struct)
     # Get the atom names without primes
     struct.atom_name = unprime(struct.atom_name)
     # Add the residue name on to the atom name if it is not on the backbone
@@ -176,12 +178,20 @@ def read_structure(
     ]
     # Get rid of any weird bases
     struct.res_name = np.char.replace(struct.res_name, "DU", "U")
+    struct.res_name = np.char.replace(struct.res_name, "DT", "U")
+    struct.res_name = np.char.replace(struct.res_name, "DC", "C")
+    struct.res_name = np.char.replace(struct.res_name, "DG", "G")
+    struct.res_name = np.char.replace(struct.res_name, "I", "A")
+    struct.res_name = np.char.replace(struct.res_name, "DA", "A")
     # Get the coordinates
     coordinates = struct.coord
     # Get the bonds
     bonds = struct.bonds.as_array()
     bond_edges = bonds[:, 0:2]
     bond_types = bonds[:, 2]
+
+    if bond_edges.size == 0:
+        return None
 
     # Get the atom names as integers
     atom_names = np.array([
@@ -214,7 +224,7 @@ def read_structure(
         residue_sizes > 0
     ]
     # Get the size of each chain
-    _, chain_ix = np.unique(
+    chain_ids, chain_ix = np.unique(
         struct.chain_id,
         return_inverse=True,
     )
@@ -232,6 +242,7 @@ def read_structure(
         residues,
         residue_sizes,
         chain_sizes,
+        chain_ids,
     )
 
 
@@ -260,6 +271,7 @@ def to_cif(
     # Set element symbols and residue indices
     atom_array.element = np.array(elements, dtype="U2")
     atom_array.res_id = np.array(residue_ix)
+    atom_array.chain_id = np.array(['A'] * residue_ix.shape[0])
 
     # Create a CIFFile and add the AtomArray structure
     cif_file = CIFFile()
@@ -270,13 +282,15 @@ def to_cif(
 
 
 def create_structure_dataset(
-    directory: str,
-    extension: str,
+    files: str,
     out_file: str,
     connect_via: str = 'residue_names',
+    add_hydrogen: bool = True,
+    max: int | None = None
 ) -> None:
 
-    ids = []
+    molecule_ids_ls = []
+    chain_ids_ls = []
 
     coordinates_ls = []
     residues_ls = []
@@ -292,29 +306,34 @@ def create_structure_dataset(
 
     prev_edge_ix = 0
 
-    for file in tqdm(
-        os.listdir(directory),
-        desc=f'Reading {extension} files'
-    ):
+    for i, file in enumerate(tqdm(files)):
 
-        if not file.endswith(extension):
+        try:
+            out = read_structure(
+                file,
+                connect_via,
+                add_hydrogen,
+            )
+        except Exception as e:
+            print(f"Skipping {file} due to exception {e}.")
             continue
 
-        ids.append(
-            Path(file).stem
-        )
+        if out is None:
+            continue
+        else:
+            (coordinates,
+             bond_edges,
+             bond_types,
+             atom_names,
+             elements,
+             residues,
+             residue_sizes,
+             chain_sizes,
+             chain_ids,
+             ) = out
 
-        (coordinates,
-         bond_edges,
-         bond_types,
-         atom_names,
-         elements,
-         residues,
-         residue_sizes,
-         chain_sizes) = read_structure(
-            os.path.join(directory, file),
-            connect_via,
-        )
+        molecule_ids_ls.append(Path(file).stem)
+        chain_ids_ls.append(chain_ids)
 
         coordinates_ls.append(coordinates)
         residues_ls.append(residues)
@@ -339,10 +358,14 @@ def create_structure_dataset(
             bond_edges.shape[0]
         )
 
+        if max is not None and i >= max:
+            break
+
     coordinates = np.concatenate(coordinates_ls)
     residues = np.concatenate(residues_ls).astype(np.int64)
     elements = np.concatenate(elements_ls).astype(np.int64)
     atom_names = np.concatenate(atom_names_ls).astype(np.int64)
+    chain_ids = np.concatenate(chain_ids_ls).astype(str)
 
     bond_edges = np.concatenate(bond_edges_ls).astype(np.int64)
     bond_types = np.concatenate(bond_types_ls).astype(np.int64)
@@ -359,7 +382,8 @@ def create_structure_dataset(
             CHAIN_SIZES_KEY: ([CHAIN_DIM], chain_sizes),
             MOLECULE_SIZES_KEY: ([MOLECULE_DIM], molecule_sizes),
             EDGE_SIZES_KEY: ([MOLECULE_DIM], edge_sizes),
-            ID_KEY: ([MOLECULE_DIM], ids),
+            ID_KEY: ([MOLECULE_DIM], molecule_ids_ls),
+            "chain_id": ([CHAIN_DIM], chain_ids),
             ELEMENTS_KEY: ([ATOM_DIM], elements),
             'atom_names': ([ATOM_DIM], atom_names),
             'residues': ([ATOM_DIM], residues),
@@ -454,10 +478,12 @@ class StructureDataset:
         self.ds = self.ds.drop_vars(dropped_features)
         # Get the number of residues and chains per molecule
         self.residues_per_molecule = _partitionCount(
-            self.residue_sizes, self.molecule_sizes,
+            self.residue_sizes,
+            self.molecule_sizes,
         )
         self.chains_per_molecule = _partitionCount(
-            self.chain_sizes, self.molecule_sizes,
+            self.chain_sizes,
+            self.molecule_sizes,
         )
 
         # Get the starting position of each atom group in the dataset
@@ -541,6 +567,11 @@ class StructureDataset:
         edges = torch.Tensor(
             data[EDGES_KEY].values
         )
+        bond_types = torch.Tensor(
+            data['bond_types'].values
+        )
+        molecule_ids = data[ID_KEY].values
+        chain_ids = data["chain_id"].values
         # Get the sizes of the relevant objects
         residue_sizes = self.residue_sizes[residue_slice]
         chain_sizes = self.chain_sizes[chain_slice]
@@ -576,17 +607,24 @@ class StructureDataset:
             dtype=torch.long,
             device=self.device,
         )
+        bond_types = bond_types.to(
+            dtype=torch.long,
+            device=self.device,
+        )
         user_features = [
             feature.to(self.device)
             for feature in user_features
         ]
         # Return, including the relevant indices as well
         return (
+            molecule_ids,
+            chain_ids,
             coordinates,
             elements,
             residues,
             atom_names,
             edges,
+            bond_types,
             residue_sizes,
             chain_sizes,
             molecule_sizes,

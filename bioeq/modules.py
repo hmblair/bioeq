@@ -1,5 +1,6 @@
-
 from __future__ import annotations
+
+from torch.nn.modules import activation
 from .geom import (
     Repr,
     ProductRepr,
@@ -9,20 +10,12 @@ from .geom import (
 )
 from .polymer import GeometricPolymer
 from .seq import sinusoidal_embedding
-from .kernel import CUDA_AVAILABLE
-if CUDA_AVAILABLE:
-    from .kernel._mm import EquivariantMatmulKernel
 import torch
 import torch.nn as nn
 import dgl
 from copy import copy, deepcopy
 import itertools
 import os
-
-
-KERNEL = os.environ.get("BIOEQ_KERNEL", "0") == "1"
-if KERNEL and not CUDA_AVAILABLE:
-    raise RuntimeError('The kernel was not compiled.')
 
 
 class EquivariantLinear(nn.Module):
@@ -35,7 +28,8 @@ class EquivariantLinear(nn.Module):
         repr: Repr,
         out_repr: Repr,
         dropout: float = 0.0,
-        activation: nn.Module | None = None,
+        activation: nn.Module | None = nn.LeakyReLU(0.2),
+        bias: bool = True,
     ) -> None:
 
         super().__init__()
@@ -78,7 +72,7 @@ class EquivariantLinear(nn.Module):
         nscalar, scalar_locs = repr.find_scalar()
 
         self.scalar_locs = scalar_locs
-        if nscalar > 0:
+        if nscalar > 0 and bias:
             self.bias = nn.Parameter(
                 torch.randn(out_repr.mult, nscalar),
                 requires_grad=True,
@@ -190,14 +184,13 @@ class EquivariantTransition(nn.Module):
 
         super().__init__()
         self.proj1 = EquivariantLinear(
-            repr,
-            hidden_repr,
+            repr, hidden_repr, activation=None,
         )
         self.gating = EquivariantGating(
             hidden_repr,
         )
         self.proj2 = EquivariantLinear(
-            hidden_repr, repr
+            hidden_repr, repr, activation=None,
         )
 
     def forward(
@@ -221,40 +214,31 @@ class RadialWeight(nn.Module):
 
     def __init__(
         self: RadialWeight,
-        repr: ProductRepr,
         edge_dim: int,
         hidden_dim: int,
-        dropout: float = 0.0,
+        repr: ProductRepr,
+        in_dim: int,
+        out_dim: int,
+        dropout: float = 0,
     ) -> None:
-
         super().__init__()
-        # Store the representation
-        self.repr = repr
-        # Get the output dimension shape
-        if KERNEL:
-            self.outdims = (
-                repr.nreps(),
-                repr.rep1.mult,
-                repr.rep2.mult,
-            )
-        else:
-            self.outdims = (
-                repr.rep2.mult,
-                repr.rep1.mult * repr.nreps(),
-            )
-        # Create the layers
-        tmp_out_dim = repr.nreps() * repr.rep1.mult * repr.rep2.mult
+
+        self.nl1 = repr.rep1.nreps()
+        self.nl2 = repr.rep2.nreps()
+
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.out_dim_flat = self.nl1 * self.nl2 * in_dim * out_dim
+
         self.layer1 = nn.Linear(
             edge_dim,
             hidden_dim,
         )
         self.layer2 = nn.Linear(
             hidden_dim,
-            tmp_out_dim,
+            self.out_dim_flat,
         )
-        # Create the activation
         self.activation = nn.ReLU()
-        # Create a dropout object
         self.dropout = nn.Dropout(dropout)
 
     def forward(
@@ -265,7 +249,7 @@ class RadialWeight(nn.Module):
         Forward pass of the network.
         """
 
-        # Get the batch size of the input
+        # get the batch size of the input
         *b, _ = x.size()
         # Apply the first layer and activation
         x = self.layer1(x)
@@ -273,14 +257,15 @@ class RadialWeight(nn.Module):
         # Apply dropout
         x = self.dropout(x)
         # Apply the second layer and reshape for later steps
-        return self.layer2(x).view(*b, *self.outdims)
+        return self.layer2(x).view(
+            *b, self.nl2 * self.out_dim,
+            self.nl1 * self.in_dim,
+        )
 
 
 class EquivariantConvolution(nn.Module):
     """
-    An SE(3)-equivariant convolution. This is missing the final
-    reduction step, so it can be used for a true convolution or
-    can also be passed to a graph attention layer.
+    A low-rank SE(3)-equivariant convolution.
     """
 
     def __init__(
@@ -290,61 +275,51 @@ class EquivariantConvolution(nn.Module):
         hidden_dim: int,
         dropout: float = 0.0,
     ) -> None:
-
         super().__init__()
+
         self.rwlin = RadialWeight(
-            repr,
             edge_dim,
             hidden_dim,
+            repr,
+            repr.rep1.mult,
+            repr.rep2.mult,
             dropout
         )
-        self.outdim = repr.rep2.dim()
-        if KERNEL:
-            self._kernel_mm = EquivariantMatmulKernel(repr)
-        else:
-            self._kernel_mm = None
 
     def _mm(
         self: EquivariantConvolution,
         g: dgl.DGLGraph,
-        basis: torch.Tensor,
+        bases: tuple[torch.Tensor, torch.Tensor],
         rw: torch.Tensor,
         f: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Perform an SE(3)-equivariant convolution between the given basis
-        elements, radial weights, and features.
-        """
 
-        # Get the batch size and the dimension of the output representations
-        b, *_ = basis.size()
-        # Get the sources of the edges from the graph
+        # Unpack the bases
+        b1, b2 = bases
         U, _ = g.edges()
-        # Compute the convolution in two steps. This implementation is
-        # based on the one from the NVIDIA SE(3)-transformer.
-        tmp = (f[U] @ basis).view(b, -1, self.outdim)
-        return rw @ tmp
+        N = g.num_edges()
+
+        tmp = (f[U] @ b1).view(N, -1, 1)
+        tmp = (rw @ tmp).view(N, -1, b2.size(1))
+        return tmp @ b2
 
     def forward(
         self: EquivariantConvolution,
         g: dgl.DGLGraph,
-        basis: torch.Tensor,
+        bases: tuple[torch.Tensor, torch.Tensor],
         edge_feats: torch.Tensor,
         f: torch.Tensor,
     ) -> torch.Tensor:
         """
         Compute the radial weights associated with the given edge features.
-        Then, perform an SE(3)-equivariant convolution between the basis
-        elements, radial weights, and features.
+        Then, perform a low-rank SE(3)-equivariant convolution between the
+        basis elements, radial weights, and features.
         """
 
-        # Compute the radial weights from the edge features
+        # compute the radial weights from the edge features
         rw = self.rwlin(edge_feats)
-        # Pass the parameters to the matrix multiplication kernel
-        if KERNEL:
-            return self._kernel_mm(g, basis, rw, f)
-        else:
-            return self._mm(g, basis, rw, f)
+        # pass the parameters to the convolution
+        return self._mm(g, bases, rw, f)
 
 
 class GraphAttention(nn.Module):
@@ -363,7 +338,7 @@ class GraphAttention(nn.Module):
         # Verify the number of heads
         if hidden_size % nheads != 0:
             raise ValueError(
-                "The hidden size must be divisible by the number of heads."
+                f"The hidden size ({hidden_size}) must be divisible by the number of heads ({nheads})."
             )
         self.hidden_size = hidden_size
         # The size we reshape to for multi-head attention
@@ -426,7 +401,7 @@ class GraphAttention(nn.Module):
         # Compute the attention weights
         weights = dgl.ops.edge_softmax(graph, scores)
         weights = self.dropout(weights)
-        # Bias the values of a bias is provided
+        # Bias the values if a bias is provided
         if bias is not None:
             weights = weights + bias
         # Mask the values if a mask is provided
@@ -481,6 +456,7 @@ class EquivariantAttention(nn.Module):
             repr.rep2,
             repr.rep2,
             dropout,
+            activation=None,
         )
         # Store the output dimensions
         self.outdims = (
@@ -531,7 +507,8 @@ class EquivariantLayerNorm(nn.Module):
         # The actual layernorm
         self.lnorm = nn.LayerNorm(repr.mult)
         # The nonlinearity applied to the norms
-        self.nonlinearity = nn.Softplus()
+        # self.nonlinearity = nn.Softplus()
+        self.nonlinearity = nn.Identity()
         # To prevent division by zero
         self.epsilon = epsilon
         # Get the indices to which each norm corresponds
@@ -580,6 +557,14 @@ class EquivariantTransformerBlock(nn.Module):
     ) -> None:
 
         super().__init__()
+        # The product representation associated with this layer
+        self.prepr = repr
+        self.conv = EquivariantConvolution(
+            repr,
+            edge_dim,
+            edge_hidden_dim,
+            dropout,
+        )
         # The attention block
         self.attn = EquivariantAttention(
             repr,
@@ -596,8 +581,7 @@ class EquivariantTransformerBlock(nn.Module):
         mult_match = repr.rep1.mult == repr.rep2.mult
         self.skip = deg_match and mult_match
         # Whether to apply the transition layer
-        self.transition = transition
-        if self.transition:
+        if transition:
             # The second layernorm
             self.ln2 = EquivariantLayerNorm(repr.rep2)
             # The transition layer
@@ -606,6 +590,8 @@ class EquivariantTransformerBlock(nn.Module):
             self.transition = EquivariantTransition(
                 repr.rep2, hidden_repr,
             )
+        else:
+            self.transition = None
 
     def forward(
         self: EquivariantTransformerBlock,
@@ -632,9 +618,11 @@ class EquivariantTransformerBlock(nn.Module):
             mask,
             bias,
         )
+        if self.skip:
+            features = features + features_tmp
+
         if self.transition:
             if self.skip:
-                features = features + features_tmp
                 features_tmp = features
             features = self.ln2(features)
             features = self.transition(features)
@@ -679,7 +667,7 @@ class EquivariantTransformer(nn.Module):
         out_repr_tmp = copy(out_repr)
         out_repr_tmp.mult = copy(hidden_repr.mult)
         self.proj = EquivariantLinear(
-            out_repr_tmp, out_repr,
+            out_repr_tmp, out_repr, activation=None, bias=True,
         )
         # Get the sequence of reprs the model passes through
         reprs = [in_repr] + [hidden_repr] * hidden_layers + [out_repr_tmp]
@@ -769,8 +757,11 @@ class EquivariantTransformer(nn.Module):
             coordinates,
             graph,
         )
+
         # Pass through the layers
         for layer, basis in zip(self.layers, bases):
+            # print("---------------------------------")
+            # print(node_features)
             node_features = layer(
                 graph,
                 basis,
@@ -779,5 +770,13 @@ class EquivariantTransformer(nn.Module):
                 mask,
                 bias,
             )
+
+        # print("---------------------------------")
+        # print(node_features)
+
         # Apply the output projection
-        return self.proj(node_features)
+        out = self.proj(node_features)
+        # print("---------------------------------")
+        # print(out)
+
+        return out

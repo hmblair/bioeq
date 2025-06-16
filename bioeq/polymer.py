@@ -1,5 +1,8 @@
 from __future__ import annotations
+from functools import cache
+from bioeq._cpp import _connectedSubgraphs
 from typing import Any, Union, Callable, Self
+from numpy import poly
 import torch
 import torch.nn as nn
 import torch.utils.data as tdata
@@ -18,6 +21,9 @@ from .data import (
 from copy import copy
 from ._index import (
     ATOM_PAIR_TO_ENUM,
+    ALL_PAIR_TO_ENUM,
+    TRIPLET_TO_ENUM,
+    QUAD_TO_ENUM,
     Element,
     Donors,
     Acceptors,
@@ -26,12 +32,23 @@ from ._index import (
     Residue,
     Property,
     Reduction,
+    PARTIAL_CHARGE,
+    VdW_SIGMA,
+    VdW_EPSILON,
+    COULOMB,
+    BETA,
+    Ribose,
+    Adenine,
+    Adenosine,
+    Guanosine,
+    Cytidine,
+    Uridine,
 )
 from .geom import (
     unit_dot_product,
     torsion_unit_dot_product,
+    _complete_subgraphs,
 )
-from bioeq._cpp._c import _connectedSubgraphs
 
 
 def lazyproperty(fn: Callable):
@@ -44,11 +61,9 @@ def lazyproperty(fn: Callable):
     def wrapper(self):
         # Generate the private attribute name from the function name
         private_name = f"_{fn.__name__}"
-
         # Check if the private attribute is None, and if so, call the function to set it
         if getattr(self, private_name, None) is None:
             setattr(self, private_name, fn(self))
-
         # Return the cached value
         return getattr(self, private_name)
 
@@ -75,7 +90,7 @@ def t_scatter_collate(
 
 
 REDUCTIONS = {
-    Reduction.NONE: lambda x: x,
+    Reduction.NONE: lambda features, indices, dim: features,
     Reduction.COLLATE: t_scatter_collate,
     Reduction.MEAN: t_scatter_mean,
     Reduction.SUM: t_scatter_sum,
@@ -107,6 +122,8 @@ class Polymer:
 
     def __init__(
         self: Polymer,
+        molecule_ids: list[str],
+        chain_ids: list[str],
         coordinates: torch.Tensor,
         elements: torch.Tensor,
         residues: torch.Tensor,
@@ -118,22 +135,19 @@ class Polymer:
     ) -> None:
 
         # Store all attributes
+        self.molecule_ids = molecule_ids
+        self.chain_ids = chain_ids
         self.coordinates = coordinates
         self.elements = elements
         self.residues = residues
         self.graph = graph
-        self.residue_sizes = residue_sizes
-        self.chain_sizes = chain_sizes
-        self.molecule_sizes = molecule_sizes
+        # self.graph = graph
+        self.residue_sizes = residue_sizes.long()
+        self.chain_sizes = chain_sizes.long()
+        self.molecule_sizes = molecule_sizes.long()
         self.atom_names = atom_names
-
-        self.num_edges = graph.num_edges()
-        # Compute the number of edges, atoms, residues, chains, and
-        # molecules
-        self.num_atoms = coordinates.size(0)
-        self.num_residues = self.residue_sizes.size(0)
-        self.num_chains = self.chain_sizes.size(0)
-        self.num_molecules = self.molecule_sizes.size(0)
+        # Keep track of the device of the Polymer
+        self.device = coordinates.device
         # Store the number and size of each group
         self._nums = {
             Property.ATOM: self.num_atoms,
@@ -154,12 +168,76 @@ class Polymer:
             Property.NAME: self.atom_names,
         }
 
-        U, V = self.bonds()
         self._bonds = torch.stack(
-            [U, V], dim=1,
+            self.bonds(), dim=1,
         )
         # All the variables below are lazily computed if needed
         self._bond_types = None
+        self._charge = None
+        self._hops = None
+
+    @property
+    def num_edges(
+        self: Polymer,
+    ) -> int:
+        """
+        The number of edges in the polymer.
+        """
+
+        return self.graph.num_edges()
+
+    @property
+    def num_atoms(
+        self: Polymer,
+    ) -> int:
+        """
+        The number of atoms in the polymer.
+        """
+
+        return self.coordinates.size(0)
+
+    @property
+    def num_residues(
+        self: Polymer,
+    ) -> int:
+        """
+        The number of atoms in the polymer.
+        """
+
+        return self.residue_sizes.size(0)
+
+    @property
+    def num_chains(
+        self: Polymer,
+    ) -> int:
+        """
+        The number of atoms in the polymer.
+        """
+
+        return self.chain_sizes.size(0)
+
+    @property
+    def num_molecules(
+        self: Polymer,
+    ) -> int:
+        """
+        The number of atoms in the polymer.
+        """
+
+        return self.molecule_sizes.size(0)
+
+    def split(
+        self: Polymer,
+        prop: Property
+    ) -> tuple[Polymer, ...]:
+        """
+        Split the polymer based on the given property.
+        """
+
+        return tuple(
+            self.select(torch.tensor([j]), prop)
+            for j in range(self._nums[prop])
+        )
 
     def bonds(
         self: Polymer,
@@ -205,10 +283,12 @@ class Polymer:
     def num_bonds(
         self: Polymer,
         prop: Property,
+        multiple: bool = False,
     ) -> torch.Tensor:
         """
         Count the number of bonds beginning from or terminating in each
-        different property.
+        different property. If multiple is True, then double bounds are
+        counted as two.
         """
 
         return self._hist(
@@ -216,29 +296,7 @@ class Polymer:
             prop,
         )
 
-    def formal_charge(
-        self: Polymer,
-    ) -> torch.Tensor:
-        """
-        Compute the formal charge on each atom by subtracting the
-        number of bonds from its valence.
-        """
-
-        # TODO: Account for double bonds. Return zero for now.
-        return torch.zeros(
-            self.num_atoms,
-            dtype=torch.float32
-        )
-
-        # Compute the number of bonds in each atom
-        num_bonds = self.num_bonds(
-            Property.ATOM
-        )
-        # Compute the valence of each atom
-        valence = VALENCE[self.elements]
-        # Return the difference
-        return valence - num_bonds
-
+    @cache
     def subgraphs(
         self: Polymer,
         num_atoms: int,
@@ -248,20 +306,14 @@ class Polymer:
         of atoms.
         """
 
-        # Compute the bonds per molecule
-        bonds_per_molecule = self.num_bonds(
-            Property.MOLECULE,
-        )
         # Call into the C++ function
         return _connectedSubgraphs(
             self._bonds,
-            bonds_per_molecule,
             num_atoms,
         )
 
     def angles(
         self: Polymer,
-        rtype: Reduction,
     ) -> _Reduction:
         """
         Compute all bond angles in the polymer.
@@ -272,59 +324,51 @@ class Polymer:
         # Get the corresponding coordinates
         triple_coords = self.coordinates[triples]
         # Compute the angles
-        angles = unit_dot_product(triple_coords)
-        # Find the atom types
-        types = self.atom_names[triples]
-
-        utypes = types[:, 0] + types[:, 1] * 76 + types[:, 2] * 76 * 76
-        _, utypes = utypes.unique(return_inverse=True)
-
-        return angles, utypes, REDUCTIONS[rtype](
-            angles,
-            utypes,
-            dim=ATOM_DIM,
-        )
+        return unit_dot_product(triple_coords)
 
     def torsions(
         self: Polymer,
-        rtype: Reduction,
     ) -> _Reduction:
         """
         Compute all torsion angles in the polymer.
         """
 
-        # Find all quadruples of atoms
+        # Find all quadruplets of atoms
         quads = self.subgraphs(4)
         # Get the corresponding coordinates
         quad_coords = self.coordinates[quads]
-        # Compute the torsion angles
-        tor_angles = torsion_unit_dot_product(quad_coords)
-        # Find the atom types
-        types = self.atom_names[quads]
+        # Compute the angles
+        return torsion_unit_dot_product(quad_coords)
 
-        utypes = types[:, 0] + types[:, 1] * 76 + \
-            types[:, 2] * 76 * 76 + types[:, 3] * 76 * 76 * 76
-
-        _, utypes = utypes.unique(return_inverse=True)
-
-        return tor_angles, utypes, REDUCTIONS[rtype](
-            tor_angles,
-            utypes,
-            dim=ATOM_DIM,
-        )
-
-    @lazyproperty
-    def bond_types(
+    @cache
+    def subgraph_types(
         self: Polymer,
+        num_atoms: int,
     ) -> torch.Tensor:
         """
-        Update the bond types.
+        Enumate all subgraphs in the polymer and associate each one
+        with a unique integer based on the atom types in the subgraph.
         """
 
-        # Get the source and destination of each edge
-        ix = self.atom_names[self._bonds]
-        # Get the bond types
-        return ATOM_PAIR_TO_ENUM[ix[:, 0], ix[:, 1]]
+        # Get all subgraphs in the polymer
+        sg = self.subgraphs(num_atoms)
+        # Get the corresponding atom names
+        names = self.atom_names[sg]
+        # Get a unique index per triplet
+        if num_atoms == 2:
+            return ATOM_PAIR_TO_ENUM[
+                *[names[:, i] for i in range(2)]
+            ]
+        elif num_atoms == 3:
+            return TRIPLET_TO_ENUM[
+                *[names[:, i] for i in range(3)]
+            ]
+        elif num_atoms == 4:
+            return QUAD_TO_ENUM[
+                *[names[:, i] for i in range(4)]
+            ]
+        else:
+            raise ValueError("must be 3 or 4.")
 
     def _masked_size(
         self: Polymer,
@@ -343,7 +387,8 @@ class Polymer:
             Reduction.SUM,
         )
         # Remove all zero-sized [scale]s
-        return sizes[sizes > 0]
+        nonzero = sizes > 0
+        return nonzero, sizes[nonzero]
 
     def __getitem__(
         self: Polymer,
@@ -354,13 +399,13 @@ class Polymer:
         """
 
         # Get the size of each scale post-masking
-        residue_sizes = self._masked_size(
+        _, residue_sizes = self._masked_size(
             ix, Property.RESIDUE
         )
-        chain_sizes = self._masked_size(
+        chain_ix, chain_sizes = self._masked_size(
             ix, Property.CHAIN
         )
-        molecule_sizes = self._masked_size(
+        molecule_ix, molecule_sizes = self._masked_size(
             ix, Property.MOLECULE
         )
         # Get the subgraph
@@ -370,8 +415,12 @@ class Polymer:
         elements = self.elements[ix]
         residues = self.residues[ix]
         atom_names = self.atom_names[ix]
+        molecule_ids = self.molecule_ids[molecule_ix.numpy()]
+        chain_ids = self.chain_ids[chain_ix.numpy()]
         # Create and return a new Polymer object with the subsetted data
         return Polymer(
+            molecule_ids,
+            chain_ids,
             coordinates,
             elements,
             residues,
@@ -424,9 +473,7 @@ class Polymer:
         contained in the given indices.
         """
 
-        return self[
-            self._mask(ix, prop)
-        ]
+        return self[self._mask(ix, prop)]
 
     def indices(
         self: Polymer,
@@ -464,34 +511,40 @@ class Polymer:
             dim=ATOM_DIM,
         )
 
-    def breduce(
+    def sreduce(
         self: Polymer,
         features: torch.Tensor,
+        num_atoms: int,
         rtype: Reduction = Reduction.MEAN,
     ) -> _Reduction:
         """
-        Reduce the input values within each copy of the given object.
-        MIN and MAX reductions return the indices too. A NONE reduction
-        instead returns a list of tensors containing the values
-        aligning with each specific index.
+        Reduce among all subgraphs in the polymer with the given number
+        of atoms.
         """
 
-        # Get the indices of the given scale and reduce
+        # Reduce the features over the subgraphs
         return REDUCTIONS[rtype](
             features,
-            self.bond_types,
+            self.subgraph_types(num_atoms),
             dim=ATOM_DIM,
         )
 
     def aggregate(
         self: Polymer,
         features: torch.Tensor,
+        rtype: Reduction = Reduction.MEAN,
     ) -> torch.Tensor:
         """
         Aggregate the input features to the destination node.
         """
 
-        return dgl.ops.copy_e_sum(self.graph, features)
+        # Reduce the features over the subgraphs
+        U, _ = self.bonds()
+        return REDUCTIONS[rtype](
+            features,
+            U,
+            dim=ATOM_DIM,
+        )
 
     def hbond(
         self: Polymer,
@@ -676,6 +729,31 @@ class Polymer:
             dim=-1,
         )
 
+    def complete(self: Polymer, hops: int = 0) -> Polymer:
+        """
+        Connect all atoms in the same molecule with edges.
+        """
+
+        _graph = _complete_subgraphs(self.molecule_sizes)
+        if (hops > 0):
+            shortest_dist = self.shortest_distance()
+            U, V = _graph.edges()
+            mask = shortest_dist[U, V] > hops
+            _graph = dgl.graph((U[mask], V[mask]))
+
+        return Polymer(
+            self.molecule_ids,
+            self.chain_ids,
+            self.coordinates,
+            self.elements,
+            self.residues,
+            self.atom_names,
+            _graph,
+            self.residue_sizes,
+            self.chain_sizes,
+            self.molecule_sizes,
+        )
+
     def _pc(
         self: Polymer,
         prop: Property,
@@ -712,6 +790,18 @@ class Polymer:
             self.coordinates ** n,
             prop,
         )
+
+    def rotate(
+        self: Polymer,
+        R: torch.Tensor,
+    ) -> Polymer:
+        """
+        Rotate the coordinates of the polymer
+        """
+
+        out = copy(self)
+        out.coordinates = out.coordinates @ R
+        return out
 
     def align(
         self: Polymer,
@@ -781,8 +871,7 @@ class Polymer:
             num_neighbours,
             self.molecule_sizes.tolist(),
         )
-        # Update the number of edges
-        self.num_edges = self.graph.num_edges()
+        # Update the bonds
         U, V = self.bonds()
         self._bonds = torch.stack(
             [U, V], dim=1,
@@ -796,19 +885,37 @@ class Polymer:
         Move all tensors to the given device.
         """
 
-        # Copy so as not to overwrite
-        new = copy(self)
         # Move the coordinates to the object
-        new.coordinates = self.coordinates.to(dest)
+        coordinates = self.coordinates.to(dest)
         # If the object is not a new dtype, then also move all the
         # indices to the object too
+        graph = self.graph
+        elements = self.elements
+        residues = self.residues
+        atom_names = self.atom_names
+        residue_sizes = self.residue_sizes
+        chain_sizes = self.chain_sizes
+        molecule_sizes = self.molecule_sizes
+
         if not isinstance(dest, torch.dtype):
-            new.graph = self.graph.to(dest)
-            new.elements = self.elements.to(dest)
-            new.residue_sizes = self.residue_sizes.to(dest)
-            new.chain_sizes = self.chain_sizes.to(dest)
-            new.molecule_sizes = self.molecule_sizes.to(dest)
-        return new
+            elements = elements.to(dest)
+            residues = residues.to(dest)
+            atom_names = atom_names.to(dest)
+            graph = graph.to(dest)
+            residue_sizes = residue_sizes.to(dest)
+            chain_sizes = chain_sizes.to(dest)
+            molecule_sizes = molecule_sizes.to(dest)
+
+        return self.__class__(
+            coordinates,
+            elements,
+            residues,
+            atom_names,
+            graph,
+            residue_sizes,
+            chain_sizes,
+            molecule_sizes,
+        )
 
     def element_names(
         self: Polymer,
@@ -843,6 +950,187 @@ class Polymer:
             residue_strs[ix]
             for ix in residues.tolist()
         ])
+
+    @lazyproperty
+    def charge(
+        self: Polymer,
+    ) -> torch.Tensor:
+        """
+        Return the partial charges on each atom.
+        """
+
+        return PARTIAL_CHARGE[self.atom_names]
+
+    def _coulomb(
+        self: Polymer,
+        rpd: torch.Tensor,
+        prop: Property = Property.MOLECULE,
+        params: torch.Tensor = PARTIAL_CHARGE,
+    ) -> torch.Tensor:
+        """
+        Return the Coulomb energy of the molecule using the partial charges.
+        """
+
+        DIELECTRIC = 1 / 6
+
+        # Get the partial charges
+        pc = params[self.atom_names]
+        # Compute the Coulomb energy
+        energy = rpd * pc[:, None] * pc[None, :]
+        # Zero out any atoms which are too close in bond-space
+        # energy[self.hops < 4] = 0
+        # Sum over all atoms in one dimension
+        energy = energy.sum(-1)
+        # Reduce to get the energy contributions
+        return DIELECTRIC * COULOMB * self.reduce(
+            energy,
+            prop,
+            Reduction.SUM,
+        )
+
+    def _coulomb_grad(
+        self: Polymer,
+        rpd: torch.Tensor,
+        params: torch.Tensor = PARTIAL_CHARGE,
+    ) -> torch.Tensor:
+        """
+        Return the Coulomb energy of the molecule using the partial charges.
+        """
+
+        DIELECTRIC = 1 / 6
+
+        # Get the pairwise differenes
+        diff = self.coordinates[:, None] - self.coordinates[None, :]
+        # Get the partial charges
+        pc = params[self.atom_names]
+        # Compute the Coulomb energy
+        energy = -2 * diff * (rpd[..., None] ** 3) * \
+            pc[:, None, None] * pc[None, :, None]
+        # Zero out any atoms which are too close in bond-space
+        energy[self.hops < 4] = 0
+        # Sum over all atoms in one dimension
+        return DIELECTRIC * COULOMB * energy.sum(1)
+
+    def _coulomb_hess(
+        self: Polymer,
+        rpd: torch.Tensor,
+        params: torch.Tensor = PARTIAL_CHARGE,
+    ) -> torch.Tensor:
+        """
+        Return the Coulomb energy of the molecule using the partial charges.
+        """
+
+        DIELECTRIC = 1 / 6
+
+        # Get the pairwise differenes
+        diff = self.coordinates[:, None] - self.coordinates[None, :]
+        # Get the partial charges
+        pc = params[self.atom_names]
+        # Compute the Coulomb energy
+        energy = -2 * (rpd[..., None] ** 3 - 3 * diff ** 2 * rpd[..., None] ** 5) * \
+            pc[:, None, None] * pc[None, :, None]
+        # Zero out any atoms which are too close in bond-space
+        energy[self.hops < 4] = 0
+        # Sum over all atoms in one dimension
+        return DIELECTRIC * COULOMB * energy.sum(1)
+
+    def shortest_distance(self: Polymer) -> torch.Tensor:
+        """
+        Get the shortest distance between each pair of atoms along the bond graph.
+        """
+
+        return dgl.shortest_dist(
+            dgl.to_bidirected(self.graph)
+        )
+
+    @lazyproperty
+    def hops(
+        self: Polymer,
+    ) -> torch.Tensor:
+        """
+        Return the number of hops bewteen all atoms in the polymer.
+        """
+
+        U, V = self.bonds()
+        dists = self.shortest_distance()
+        return dists[U, V]
+
+    @lazyproperty
+    def bond_types(self: Polymer) -> torch.Tensor:
+        """
+        Get a unique identifier for each pair of atoms in the molecule
+        """
+
+        U, V = self.bonds()
+
+        return ATOM_PAIR_TO_ENUM[
+            self.atom_names[U],
+            self.atom_names[V],
+        ]
+
+    def all_bond_types(self: Polymer) -> torch.Tensor:
+        """
+        Get a unique identifier for each pair of atoms in the molecule
+        """
+
+        U, V = self.bonds()
+
+        return ALL_PAIR_TO_ENUM[
+            self.atom_names[U],
+            self.atom_names[V],
+        ]
+
+    def _vdw(
+        self: Polymer,
+        rpd: torch.Tensor,
+        prop: Property = Property.MOLECULE,
+        sigma_params: torch.Tensor = VdW_SIGMA,
+        epsilon_params: torch.Tensor = VdW_EPSILON,
+    ) -> torch.Tensor:
+        """
+        Return the Lennard-Jones energy of the molecule.
+        """
+
+        # Get the VdW sigma and epsilon values
+        sigma = sigma_params[self.atom_names]
+        epsilon = epsilon_params[self.atom_names]
+        # Use the Lorentz-Berthelot rules to get the pairwise values
+        p_sigma = (sigma[None, :] + sigma[:, None]) / 2
+        p_epsilon = torch.sqrt(epsilon[None, :] * epsilon[:, None])
+        # Multiply by sigma
+        rpd = rpd * p_sigma
+        # Compute the LJ potential
+        lj_energy = 4 * p_epsilon * (rpd ** 12 - rpd ** 6)
+        # Zero out any atoms which are too close in bond-space
+        lj_energy[self.hops < 4] = 0
+        # Sum over all atoms
+        lj_energy = lj_energy.sum(-1)
+        # Reduce to get the energy contribution
+        return self.reduce(
+            lj_energy,
+            prop,
+            Reduction.SUM,
+        )
+
+    def _energy(
+        self: Polymer,
+        prop: Property = Property.MOLECULE,
+        charge_params: torch.Tensor = PARTIAL_CHARGE,
+        sigma_params: torch.Tensor = VdW_SIGMA,
+        epsilon_params: torch.Tensor = VdW_EPSILON,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute the Coulomb and VdW energies of the polymer.
+        """
+
+        # Get the pairwise distances
+        pdist = self.global_pdist()
+        # Take the reciprocal and zero out the diagonal
+        rpd = (1 / pdist).fill_diagonal_(0.0)
+        # Compute the eneriges
+        coulomb = self._coulomb(rpd, prop, charge_params)
+        vdw = self._vdw(rpd, prop, sigma_params, epsilon_params)
+        return coulomb, vdw
 
     def cif(
         self: Polymer,
@@ -894,6 +1182,8 @@ class GeometricPolymer(Polymer):
     ) -> None:
 
         super().__init__(
+            polymer.molecule_ids,
+            polymer.chain_ids,
             polymer.coordinates,
             polymer.elements,
             polymer.residues,
@@ -985,6 +1275,46 @@ def polymer_covariance(
     )
 
 
+def polymer_kabsch_align(
+    polymer1: Polymer,
+    polymer2: Polymer,
+    weight: torch.Tensor | None = None,
+    prop: Property = Property.MOLECULE,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Get the aligned distance between the individual molecules in the polymers
+    using the kabsch algorithm. The two polymers should have the same molecule
+    indices. An optional weight can be provided to bias the alignment.
+    """
+
+    # Center the polymers
+    polymer1_c = polymer1.center(prop)
+    polymer2_c = polymer2.center(prop)
+    # Weight the coordinates accordingly
+    if weight is not None:
+        weight = polymer1.num_atoms * weight / weight.mean()
+        weight = weight[:, None]
+        polymer1_c.coordinates = polymer1_c.coordinates * weight
+        polymer2_c.coordinates = polymer2_c.coordinates * weight
+    # Get the coordinate covariance matrices
+    cov = polymer_covariance(
+        polymer1_c,
+        polymer2_c,
+        prop,
+    )
+    # Calculate the singular value decomposition
+    U, _, Vh = torch.linalg.svd(cov)
+    # Get the correction factor and apply it to the last column of V
+    d = torch.linalg.det(U) * torch.linalg.det(Vh)
+    Vh[:, -1] = Vh[:, -1] * d[..., None]
+    # Calculate the optimal rotation matrix
+    rot = U @ Vh
+    # Apply the rotation to the coordinates of the first polymer
+    coords1 = polymer1.coordinates[:, None,
+                                   :] @ rot[polymer1.indices(Property.MOLECULE)]
+    return coords1.squeeze(1), polymer2.coordinates
+
+
 def polymer_kabsch_distance(
     polymer1: Polymer,
     polymer2: Polymer,
@@ -1002,7 +1332,7 @@ def polymer_kabsch_distance(
     polymer2_c = polymer2.center(prop)
     # Weight the coordinates accordingly
     if weight is not None:
-        weight = weight / weight.mean()
+        weight = polymer1.num_atoms * weight / weight.mean()
         weight = weight[:, None]
         polymer1_c.coordinates = polymer1_c.coordinates * weight
         polymer2_c.coordinates = polymer2_c.coordinates * weight
@@ -1014,7 +1344,10 @@ def polymer_kabsch_distance(
     )
     # Get the mean the of singular values of the covariance matrices, reversing
     # the sign of the final one if necessary
-    sigma = torch.linalg.svdvals(cov)
+    try:
+        sigma = torch.linalg.svdvals(cov)
+    except Exception:
+        breakpoint()
     det = torch.linalg.det(cov)
     # Clone to preserve gradients
     sigma = sigma.clone()
@@ -1100,11 +1433,14 @@ class PolymerDataset(tdata.Dataset):
 
         # Load the raw data
         (
+            molecule_ids,
+            chain_ids,
             coordinates,
             elements,
             residues,
             atom_names,
             edges,
+            bond_strength,
             residue_sizes,
             chain_sizes,
             molecule_sizes,
@@ -1116,6 +1452,8 @@ class PolymerDataset(tdata.Dataset):
         )
         # Construct the polymer
         polymer = Polymer(
+            molecule_ids,
+            chain_ids,
             coordinates,
             elements,
             residues,
@@ -1144,3 +1482,116 @@ class PolymerDataset(tdata.Dataset):
         """
 
         return self.structures.__repr__()
+
+
+def _ideal_bond_lengths(
+    polymer: Polymer,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Get the ideal bond lengths of each bond in the polymer. Return also
+    the associated spring constants.
+    """
+
+    # Compute pairwise distances
+    pdist = polymer.pdist()
+    # Compute ideal distances as the mean
+    mean_pdist = polymer.sreduce(pdist, 2)
+    # Compute the spring constants
+    std_pdist = polymer.sreduce(
+        (pdist - mean_pdist[polymer.subgraph_types(2)]) ** 2,
+        2
+    )
+    kb = 3 / (2 * BETA * std_pdist)
+    return mean_pdist, kb
+
+
+def _ideal_bond_angles(
+    polymer: Polymer,
+) -> torch.Tensor:
+    """
+    Get the ideas bond angles of each bonded triplet in the polymer.
+    Return also the associated spring constants.
+    """
+
+    # Compute angles
+    angles = polymer.angles()
+    # Compute ideal angles as the mean
+    mean_angles = polymer.sreduce(angles, 3)
+    # Compute the spring constants
+    std_angles = polymer.sreduce(
+        (angles - mean_angles[polymer.subgraph_types(3)]) ** 2,
+        3
+    )
+    ka = 1 / (2 * BETA * std_angles)
+    return mean_angles, ka
+
+
+def _ideal_torsion_angles(
+    polymer: Polymer,
+) -> torch.Tensor:
+    """
+    Get the ideas bond angles of each bonded triplet in the polymer.
+    Return also the associated spring constants.
+    """
+
+    # Compute angles
+    angles = polymer.torsions()
+    # Compute ideal angles as the mean
+    mean_angles = polymer.sreduce(angles, 4)
+    # Compute the spring constants
+    std_angles = polymer.sreduce(
+        (angles - mean_angles[polymer.subgraph_types(4)]) ** 2,
+        4,
+    )
+    kt = 1 / (2 * BETA * std_angles)
+    kt[kt < 1000] = 0
+    return mean_angles, kt
+
+
+def _ideal_coordinates(
+    polymer: Polymer,
+) -> list[torch.Tensor]:
+    """
+    Return the ideal coordinates of each of the four bases in the polymer.
+    """
+
+    ad = polymer.select(
+        Ribose.index(),
+        Property.NAME,
+    )
+    ad = ad.center(Property.RESIDUE)
+    ad, _ = ad.align(Property.RESIDUE)
+    ad.cif('adenosine_tst.cif', True)
+    coords = ad.reduce(
+        ad.coordinates,
+        Property.NAME,
+    )
+    return coords[Ribose.index()[:-1]]
+
+
+def _steric_anomaly(
+    polymer: Polymer,
+    ideals: torch.Tensor,
+    ks: torch.Tensor,
+    n: int,
+) -> torch.Tensor:
+    """
+    Compute the steric anomaly based on the given ideal values.
+    """
+
+    # Get an ideal value for each of the subgraph types
+    ideals = ideals[polymer.subgraph_types(n)]
+    ks = ks[polymer.subgraph_types(n)]
+
+    if n == 2:
+        return torch.mean(
+            ks * (ideals - polymer.pdist()) ** 2
+        )
+    if n == 3:
+        return torch.mean(
+            ks * (ideals - polymer.angles()) ** 2
+        )
+    if n == 4:
+        return torch.mean(
+            ks * (ideals - polymer.torsions()) ** 2
+        )

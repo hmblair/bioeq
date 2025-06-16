@@ -1,6 +1,65 @@
 from __future__ import annotations
+import itertools
 import torch
 import torch.nn as nn
+
+
+#
+# Feedforward layers
+#
+
+
+class DenseNetwork(nn.Module):
+    """
+    A series of feedforward layers.
+    """
+
+    def __init__(
+        self: DenseNetwork,
+        in_size: int,
+        out_size: int,
+        hidden_sizes: list[int] = [],
+        dropout: float = 0.0,
+        bias: bool = True,
+        activation: nn.Module = nn.ReLU(),
+    ) -> None:
+
+        super().__init__()
+        # Define the sizes of the network
+        features = [in_size] + hidden_sizes + [out_size]
+        # Construct the layers
+        layers = []
+        for l1, l2 in itertools.pairwise(features):
+            layers.append(
+                nn.Linear(l1, l2, bias)
+            )
+        # Store the layers and other relevant attributes
+        self.layers = nn.ModuleList(layers)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = activation
+
+    def forward(
+        self: DenseNetwork,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        The forward pass of the model, taking an input of shape
+        (*b, in_size) and returning an output of shape (*b, out_size).
+        """
+
+        # Apply each layer, save for the last, and corresponding
+        # dropoput and activation
+        for layer in self.layers[:-1]:
+            x = self.dropout(
+                self.activation(layer(x))
+            )
+        # Apply the final layer, with no activation or dropout
+        return self.layers[-1](x)
+
+
+#
+# Positional encodings
+#
 
 
 def sinusoidal_embedding(

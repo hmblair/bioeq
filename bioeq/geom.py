@@ -41,17 +41,13 @@ def unit_dot_product(
     """
 
     # Get the difference vectors
-    diff1 = coordinates[:, 0] - coordinates[:, 1]
-    diff2 = coordinates[:, 1] - coordinates[:, 2]
+    diff = coordinates[:, 1:] - coordinates[:, :-1]
     # Normalise the differences
-    diff1 = diff1 / torch.linalg.norm(
-        diff1, dim=-1, keepdim=True
-    )
-    diff2 = diff2 / torch.linalg.norm(
-        diff2, dim=-1, keepdim=True
+    diff_unit = diff / torch.linalg.norm(
+        diff,  dim=-1, keepdim=True
     )
     # Compute the dot product
-    return (diff1 * diff2).sum(-1)
+    return (diff_unit[:, 0] * diff_unit[:, 1]).sum(-1)
 
 
 def torsion_unit_dot_product(
@@ -64,21 +60,14 @@ def torsion_unit_dot_product(
     """
 
     # Compute bond vectors
-    b1 = coordinates[:, 1] - coordinates[:, 0]
-    b2 = coordinates[:, 2] - coordinates[:, 1]
-    b3 = coordinates[:, 3] - coordinates[:, 2]
-
-    # Normalize b2 to get the unit vector
-    b2_unit = b2 / b2.norm(dim=-1, keepdim=True)
-
-    # Compute the perpendicular vectors to the planes formed by b1, b2 and b2, b3
-    n1 = torch.cross(b1, b2_unit, dim=-1)
-    n2 = torch.cross(b2_unit, b3, dim=-1)
-
+    b = coordinates[:, 1:] - coordinates[:, :-1]
+    # Compute the perpendicular vectors to the planes formed by b1, b2
+    # and b2, b3
+    n1 = torch.cross(b[:, 0], b[:, 1], dim=-1)
+    n2 = torch.cross(b[:, 1], b[:, 2], dim=-1)
     # Compute the unit vectors of n1 and n2
     n1_unit = n1 / n1.norm(dim=-1, keepdim=True)
     n2_unit = n2 / n2.norm(dim=-1, keepdim=True)
-
     # Compute the torsion angle via dot product
     return (n1_unit * n2_unit).sum(dim=-1)
 
@@ -264,6 +253,36 @@ def get_local_frame(x: torch.Tensor) -> torch.Tensor:
     x3 = torch.cross(x1, x2, dim=-1)
     # Stack the vectors to get the local frame
     return torch.stack([x1, x2, x3], dim=-2)
+
+
+def _complete_subgraphs(sizes: torch.Tensor) -> dgl.DGLGraph:
+    """
+    Create a graph with sum(sizes) nodes consisting of complete subgraphs of the given sizes.
+    """
+
+    src = []
+    dst = []
+
+    start = 0
+    for size in sizes:
+
+        nodes = torch.arange(start, start + size)
+        src_tensor, dst_tensor = torch.meshgrid(nodes, nodes, indexing='ij')
+
+        ix = torch.triu_indices(src_tensor.shape[0], src_tensor.shape[1], 1)
+
+        complete_src = src_tensor[ix[0], ix[1]].flatten()
+        complete_dst = dst_tensor[ix[0], ix[1]].flatten()
+
+        src.append(complete_src)
+        dst.append(complete_dst)
+
+        start += size
+
+    src = torch.cat(src)
+    dst = torch.cat(dst)
+
+    return dgl.graph((src, dst))
 
 
 #
@@ -510,80 +529,6 @@ class ProductIrrep:
         """
         return len(self.reps)
 
-    def _coupling(
-        self: ProductIrrep,
-        l: int,
-    ) -> torch.Tensor:
-        """
-        Return the coupling coefficient for the given degree in the
-        tensor product.
-        """
-
-        # Get the representation of interest
-        rep = self.reps[l - self.lmin]
-        # Get the conversion matrices
-        Q1 = self.rep1.toreal()
-        Q2 = self.rep2.toreal()
-        Q = rep.toreal()
-        # Get the complex coupling coefficient
-        c_coeff = torch.Tensor(
-            wi.clebsch_gordan_array(
-                rep.l,
-                self.rep1.l,
-                self.rep2.l,
-            )
-        ).to(torch.complex128)
-        # Convert to the real coupling coefficient
-        return torch.einsum(
-            'ij,kl,mn,ikm->jln',
-            Q, Q1, torch.conj(Q2), c_coeff
-        ).real
-
-    def coupling(
-        self: ProductIrrep,
-    ) -> torch.Tensor:
-        """
-        Return the coupling coefficient for the real irreducible
-        decomposition of this tensor product. The terms correspdonding
-        to different irreps are placed in separate dimensions.
-        """
-
-        # Initialise an array to store the coefficient
-        coeff = torch.zeros(
-            self.dim(),
-            self.rep1.dim(),
-            self.nreps(),
-            self.rep2.dim(),
-        )
-
-        repnum = 0
-        for rep, cdim in zip(self.reps, self.cumdims()):
-
-            # Compute the real coupling coefficient
-            coeff[cdim:cdim+rep.dim(), :, repnum, :] = self._coupling(rep.l)
-            # Advance the rep number
-            repnum += 1
-
-        # return the coefficient as a 32-bit float
-        return coeff.to(torch.float32)
-
-    def low_rank_coupling(
-        self: ProductIrrep,
-    ) -> torch.Tensor:
-        """
-        Return the low-rank coupling coefficient for the real
-        irreducible decomposition of this tensor product.
-        """
-
-        # In the low-rank coupling, the coupling only occurs
-        if self.rep1.l == self.rep2.l:
-            return torch.eye(self.rep1.dim())
-        else:
-            return torch.zeros(
-                self.rep1.dim(),
-                self.rep2.dim(),
-            )
-
     def __str__(
         self: ProductIrrep,
     ) -> str:
@@ -601,7 +546,7 @@ class Repr(nn.Module):
 
     def __init__(
         self: Repr,
-        lvals: list[int],
+        lvals: list[int] = [1],
         mult: int = 1,
     ) -> None:
 
@@ -921,105 +866,6 @@ class ProductRepr:
         """
         return sum(rep.nreps() for rep in self.reps)
 
-    def coupling(
-        self: ProductRepr,
-    ) -> torch.Tensor:
-        """
-        Return the coupling coefficient for the real irreducible
-        decomposition of this tensor product.
-        """
-
-        if KERNEL:
-            # Initialise an array to store the coefficient
-            coeff = torch.zeros(
-                self.maxdim(),
-                self.rep1.dim(),
-                self.lmax() + 1,
-                self.rep2.dim(),
-            )
-            # Loop over the tensor products of the irreducible
-            # representations, and fill in the corresponding
-            # coupling coefficient
-            for rep, (rep1o, rep2o) in zip(self.reps, self.offsets):
-                coeff[
-                    rep.offset(): rep.offset() + rep.dim(),
-                    rep1o: rep1o + rep.rep1.dim(),
-                    :rep.nreps(),
-                    rep2o: rep2o + rep.rep2.dim(),
-                ] = rep.coupling()
-
-        else:
-            # Initialise an array to store the coefficient
-            coeff = torch.zeros(
-                self.maxdim(),
-                self.rep1.dim(),
-                self.nreps(),
-                self.rep2.dim(),
-            )
-
-            # Loop over the tensor products of the irreducible
-            # representations, and fill in the corresponding
-            # coupling coefficient
-            repnum = 0
-            for rep, (o1, o2) in zip(self.reps, self.offsets):
-                coeff[
-                    rep.offset(): rep.offset() + rep.dim(),
-                    o1: o1 + rep.rep1.dim(),
-                    repnum: repnum + rep.nreps(),
-                    o2: o2 + rep.rep2.dim(),
-                ] = rep.coupling()
-                repnum += rep.nreps()
-
-        # Reshape the coefficient for easier matrix multiplication with
-        # spherical harmonics
-        return coeff.view(
-            self.maxdim(), -1
-        ).contiguous()
-
-    def low_rank_coupling(
-        self: ProductRepr,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Return the two low-rank coupling coefficients for the real
-        irreducible decomposition of this tensor product.
-        """
-
-        # TODO: this does not currently work.
-
-        coeff_1 = torch.zeros(
-            self.maxdim(),
-            self.rep1.dim(),
-            self.rep2.nreps(),
-        )
-
-        for repnum, (rep, o, o2) in enumerate(zip(self.rep1.irreps, self.rep1.cumdims(), self.rep1.offsets())):
-            l_lower = o
-            l_upper = o + rep.dim()
-            for j in range(l_lower, l_upper):
-                coeff_1[o2 + j, j, repnum] = 1
-
-        coeff_1 = coeff_1.view(
-            self.maxdim(), -1
-        )
-
-        coeff_2 = torch.zeros(
-            self.maxdim(),
-            self.rep2.dim(),
-            self.rep2.nreps(),
-        )
-
-        for repnum, (rep, o, o2) in enumerate(zip(self.rep2.irreps, self.rep2.cumdims(), self.rep2.offsets())):
-            l_lower = o
-            l_upper = o + rep.dim()
-            for j in range(l_lower, l_upper):
-                coeff_2[o2 + j, j, repnum] = 1
-
-        coeff_2 = coeff_2.view(
-            self.maxdim(), -1
-        )
-
-        return coeff_1, coeff_2
-
 
 #
 # Equivariant maps and helper functions
@@ -1141,8 +987,7 @@ class SphericalHarmonic(nn.Module):
 
 class EquivariantBasis(nn.Module):
     """
-    Compute a basis for the space of equivariant maps from R^3 into the
-    coupling space of the ProductRepr.
+    Compute the equivariant weight matrices of shape (2l2+1)x(2l1+1).
     """
 
     def __init__(
@@ -1151,20 +996,14 @@ class EquivariantBasis(nn.Module):
     ) -> None:
 
         super().__init__()
-        # Get the coupling coefficient for the product representation
-        coupling = repr.coupling()
-        self.register_buffer('coupling', coupling)
-        if KERNEL:
-            self.outdims = (
-                repr.lmax() + 1,
-                repr.rep1.dim(),
-                repr.rep2.dim(),
-            )
-        else:
-            self.outdims = (
-                repr.rep1.dim(),
-                repr.rep2.dim() * repr.nreps(),
-            )
+        self.outdims1 = (
+            repr.rep1.dim(),
+            repr.rep1.nreps(),
+        )
+        self.outdims2 = (
+            repr.rep2.nreps(),
+            repr.rep2.dim(),
+        )
         # Initialise the spherical harmonic calculator
         self.sh = SphericalHarmonic(repr.lmax())
         self.repr = repr
@@ -1172,7 +1011,7 @@ class EquivariantBasis(nn.Module):
     def forward(
         self: EquivariantBasis,
         x: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Take a set of equivariant edge features of shape (..., n, 3) and return
         the equivariant weight matrix W of shape (..., n, d_in, d_out, lmax).
@@ -1180,12 +1019,23 @@ class EquivariantBasis(nn.Module):
 
         # Get the spherical harmonic features
         sh = self.sh(x)
-        # Reshape for multiplication
-        * b, maxdim = sh.size()
-        sh_r = sh.view(-1, maxdim)
-        # Multiply and reshape for multiplication with the
-        # input features
-        return (sh_r @ self.coupling).view(*b, *self.outdims)
+
+        # Set the features corresponding to the same point to zero
+        sh = torch.nan_to_num(sh, nan=0.0)
+
+        coeff1 = torch.zeros(x.size(0), *self.outdims1)
+        coeff2 = torch.zeros(x.size(0), *self.outdims2)
+        for j in range(self.repr.rep1.nreps()):
+            low = j ** 2
+            high = (j + 1) ** 2
+            coeff1[..., low:high, j] = sh[..., low:high]
+
+        for j in range(self.repr.rep2.nreps()):
+            low = j ** 2
+            high = (j + 1) ** 2
+            coeff2[..., j, low:high] = sh[..., low:high]
+
+        return coeff1, coeff2
 
     def edgewise(
         self: EquivariantBasis,
@@ -1197,112 +1047,39 @@ class EquivariantBasis(nn.Module):
         each edge in the input graph.
         """
 
-        # Get the spherical harmonic features
-        sh = self.sh.edgewise(x, graph)
-        # Reshape for multiplication
-        * b, maxdim = sh.size()
-        sh_r = sh.view(-1, maxdim)
-        # Multiply and reshape for multiplication with the
-        # input features in the convolution step
-        return (sh_r @ self.coupling).view(*b, *self.outdims)
+        U, V = graph.edges()
+        return self(x[U] - x[V])
 
 
 class EquivariantBases(nn.Module):
 
-    def __init__(self: EquivariantBases, *reprs: ProductRepr) -> None:
+    def __init__(
+        self: EquivariantBases,
+        *reprs: ProductRepr,
+    ) -> None:
+
         super().__init__()
 
         # To avoid redundant operations, we only keep the unique ProductReps
         # and keep track of the indices of each one
         self.unique_reprs = []
+        self.comps = []
         self.repr_ix = []
         repr_count = -1
         for repr in reprs:
             if repr not in self.unique_reprs:
                 self.unique_reprs.append(repr)
+                self.comps.append(EquivariantBasis(repr))
                 repr_count += 1
             self.repr_ix.append(repr_count)
-
-        # Get the maximum maxdim and lmax
-        maxdim = max(repr.maxdim() for repr in self.unique_reprs)
-        lmax = max(repr.lmax() for repr in self.unique_reprs)
-
-        # Create matrices to store the expanded coupling coefficients
-        couplings = []
-        if KERNEL:
-            couplings = [
-                torch.zeros(
-                    maxdim,
-                    repr.rep1.dim(),
-                    repr.lmax() + 1,
-                    repr.rep2.dim(),
-                ).view(maxdim, -1)
-                for repr in self.unique_reprs
-            ]
-        else:
-            couplings = [
-                torch.zeros(
-                    maxdim,
-                    repr.rep1.dim(),
-                    repr.nreps(),
-                    repr.rep2.dim(),
-                ).view(maxdim, -1)
-                for repr in self.unique_reprs
-            ]
-
-        # Register each coupling as a buffer
-        for i, coupling in enumerate(couplings):
-            self.register_buffer(f"coupling_{i}", coupling)
-
-        # Fill in the matrices
-        for repr, coupling in zip(self.unique_reprs, couplings):
-            coupling[:repr.maxdim()] = repr.coupling()
-
-        # Store the output dimensions
-        if KERNEL:
-            self.outdims = [(
-                repr.rep1.dim(),
-                repr.lmax() + 1,
-                repr.rep2.dim(),
-            ) for repr in self.unique_reprs]
-        else:
-            self.outdims = [(
-                repr.rep1.dim(),
-                repr.rep2.dim() * repr.nreps(),
-            ) for repr in self.unique_reprs]
-
-        # Initialise the spherical harmonic calculator
-        self.sh = SphericalHarmonic(lmax)
-
-    def _mm(
-        self: EquivariantBases,
-        sh: torch.Tensor,
-        coupling: torch.Tensor,
-        outdims: tuple[int, int],
-    ) -> torch.Tensor:
-        """
-        A single of the reqiured matrix multiplication steps.
-        """
-
-        # Reshape for multiplication
-        * b, maxdim = sh.size()
-        sh_r = sh.view(-1, maxdim)
-        # Multiply and reshape for multiplication with the
-        # input features in the convolution step
-        return (sh_r @ coupling).view(*b, *outdims)
 
     def forward(
         self: EquivariantBases,
         x: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
 
-        # Get the spherical harmonic features
-        sh = self.sh(x)
-        # Matrix multiplication
-        ms = [
-            self._mm(sh, self.get_buffer(f"coupling_{i}"), outdims)
-            for i, outdims in enumerate(self.outdims)
-        ]
+        # Compute the individual basis elements
+        ms = [comp(x) for comp in self.comps]
         # Expand to the required number of outputs without a new calculation
         return tuple(ms[ix] for ix in self.repr_ix)
 
@@ -1316,16 +1093,8 @@ class EquivariantBases(nn.Module):
         each edge in the input graph.
         """
 
-        # Get the spherical harmonic features
-        sh = self.sh.edgewise(x, graph)
-        # Matrix multiplication
-        ms = [
-            self._mm(sh, getattr(
-                self, f"coupling_{i}"), outdims)
-            for i, outdims in enumerate(self.outdims)
-        ]
-        # Expand to the required number of outputs without a new calculation
-        return tuple(ms[ix] for ix in self.repr_ix)
+        U, V = graph.edges()
+        return self(x[U] - x[V])
 
 
 class RadialBasisFunctions(nn.Module):
